@@ -2,7 +2,7 @@
 (typed-defun $main (i32)
   (let $counter Counter
     ($OffsetCounter.new 17 5))
-  (.read $counter))
+  ($read $counter))
 
 (export-func main)
 )

@@ -1,353 +1,200 @@
-Here is the detailed expansion around:
+# Generic-function dispatch implementation
+
+Idle implements Common Lisp-shaped `defgeneric` and `defmethod` forms using
+fixed fields in Wasm GC class descriptors. Dispatch is single dispatch on the
+first argument and takes constant time; it never searches an ancestor chain at
+runtime.
+
+This document follows the linked-list declarations in `benchmark/oop-list.idle`:
 
 ```lisp
-(classes:call List tail $cursor)
+(defclass List)
+(defclass Nil (List))
+(defclass Node (List)
+  (next List))
+
+(defgeneric $tail ((list List) List))
+
+(defmethod $tail ((list List) List)
+  $list)
+
+(defmethod $tail ((list Node) List)
+  (classes:get Node next $list))
 ```
 
-The source call expands directly to:
+## 1. One Wasm signature per generic
+
+The generic declaration creates the function type shared by its dispatcher,
+fallback, and every method implementation:
 
 ```wat
-(call $List.tail.dispatch
-  (local.get $cursor))
-```
-
-## 1. Relevant object and descriptor types
-
-```wat
-;; Base class descriptor.
-(type $tag
-  (sub
-    (struct
-      (field $classes.parent-tag (ref null $tag)))))
-
-;; Base object header.
-(type $obj
-  (sub
-    (struct
-      (field $tag (ref $tag)))))
-```
-
-`List.tail` has this function signature:
-
-```wat
-(type $List.tail.sig
+(type $generic.tail.sig
   (func
-    (param $self (ref $List))
+    (param $list (ref $List))
     (result (ref $List))))
 ```
 
-The `List` descriptor contains fixed method slots:
+Every generic has at least its explicit receiver parameter and exactly one
+result. A method may narrow only the first parameter to a subclass. Its other
+parameter types and result must match exactly, so all implementations remain
+valid references of this one Wasm function type.
+
+## 2. Stable descriptor slot
+
+The generic is introduced on its declared dispatch class. The class descriptor
+gets a function-reference field at a stable offset:
 
 ```wat
 (type $List.tag
   (sub $tag
     (struct
       (field $classes.parent-tag (ref null $tag))
-      (field $is-empty (ref $List.is-empty.sig))
-      (field $tail     (ref $List.tail.sig)))))
+      (field $generic.tail (ref $generic.tail.sig)))))
 ```
 
-Every `List` instance contains its descriptor:
+Every subclass descriptor repeats the inherited field prefix. A generic whose
+dispatch class is lower in the hierarchy adds its slot only there and below.
+This is the same prefix-layout rule used for instance fields.
 
-```wat
-(type $List
-  (sub $obj
-    (struct
-      (field $tag (ref $List.tag)))))
-```
+## 3. Method ABI
 
-`Node` preserves the same inherited descriptor slots:
-
-```wat
-(type $Node.tag
-  (sub $List.tag
-    (struct
-      (field $classes.parent-tag (ref null $tag))
-      (field $is-empty (ref $List.is-empty.sig))
-      (field $tail     (ref $List.tail.sig)))))
-```
-
-A `Node` adds its `next` instance field:
-
-```wat
-(type $Node
-  (sub $List
-    (struct
-      (field $tag  (ref $Node.tag))
-      (field $next (ref $List)))))
-```
-
-`Nil` also has a subtype descriptor and instance type:
-
-```wat
-(type $Nil.tag
-  (sub $List.tag
-    (struct
-      (field $classes.parent-tag (ref null $tag))
-      (field $is-empty      (ref $List.is-empty.sig))
-      (field $tail          (ref $List.tail.sig))
-      (field $sentinel-value (ref $Nil.sentinel-value.sig)))))
-
-(type $Nil
-  (sub $List
-    (struct
-      (field $tag      (ref $Nil.tag))
-      (field $sentinel i32))))
-```
-
-## 2. Base `List.tail` implementation
-
-The source method:
+Method source parameters are explicit:
 
 ```lisp
-(method tail ()
-  (result (ref $List))
-  $this)
+(defmethod $tail ((list Node) List)
+  (classes:get Node next $list))
 ```
 
-becomes:
+The implementation itself uses the generic's base receiver type so it can be
+stored in the shared slot. It casts that hidden ABI receiver once and then runs
+the body with the source parameter name and specialized type:
 
 ```wat
-(func $List.tail.impl
-  (type $List.tail.sig)
-  (param $self (ref $List))
+(func $generic.tail.Node.impl
+  (type $generic.tail.sig)
+  (param $generic.receiver (ref $List))
   (result (ref $List))
+  (local $list (ref $Node))
 
-  (local $this (ref $List))
-
-  (local.set $this
-    (ref.cast (ref $List)
-      (local.get $self)))
-
-  ;; Return the receiver itself.
-  (local.get $this))
-```
-
-`Nil` does not override `tail`, so its descriptor points to this implementation.
-
-## 3. `Node.tail` override
-
-The source override:
-
-```lisp
-(override tail
-  (classes:get Node next $this))
-```
-
-becomes:
-
-```wat
-(func $Node.tail.impl
-  ;; Overrides retain the signature introduced by List.
-  (type $List.tail.sig)
-  (param $self (ref $List))
-  (result (ref $List))
-
-  (local $this (ref $Node))
-
-  ;; The dispatcher accepts List, so the implementation
-  ;; narrows the receiver to Node.
-  (local.set $this
+  (local.set $list
     (ref.cast (ref $Node)
-      (local.get $self)))
+      (local.get $generic.receiver)))
 
-  ;; Return this.next.
   (struct.get $Node $next
-    (local.get $this)))
+    (local.get $list)))
 ```
 
-## 4. Class descriptors
+There is no implicit `$this`. Different methods may choose different parameter
+names without changing their shared ABI.
 
-Idle1 resolves inheritance while compiling and creates immutable descriptors.
+## 4. Compile-time method selection
 
-The base `List` descriptor:
+Class descriptors contain the method already selected for that class:
 
 ```wat
 (global $List.tag.value
   (ref $List.tag)
-
   (struct.new $List.tag
-    ;; No parent.
     (ref.null $tag)
+    (ref.func $generic.tail.List.impl)))
 
-    ;; Fixed method slots.
-    (ref.func $List.is-empty.impl)
-    (ref.func $List.tail.impl)))
-```
-
-The `Nil` descriptor inherits both methods:
-
-```wat
 (global $Nil.tag.value
   (ref $Nil.tag)
-
   (struct.new $Nil.tag
     (global.get $List.tag.value)
+    (ref.func $generic.tail.List.impl)))
 
-    ;; Inherited without modification.
-    (ref.func $List.is-empty.impl)
-    (ref.func $List.tail.impl)
-
-    ;; Method introduced by Nil.
-    (ref.func $Nil.sentinel-value.impl)))
-```
-
-The `Node` descriptor installs its overrides in the same slots:
-
-```wat
 (global $Node.tag.value
   (ref $Node.tag)
-
   (struct.new $Node.tag
     (global.get $List.tag.value)
-
-    ;; Overrides occupy the inherited fixed offsets.
-    (ref.func $Node.is-empty.impl)
-    (ref.func $Node.tail.impl)))
+    (ref.func $generic.tail.Node.impl)))
 ```
 
-Thus the `$tail` field always occupies the same descriptor offset:
+`Nil` has no local `$tail` method, so its descriptor inherits the nearest
+ancestor implementation. `Node` replaces the slot with its specialization.
+This resolution happens once while the compiler constructs descriptor values.
 
-| Receiver class | `$tail` slot |
-| --- | --- |
-| `List` | `$List.tail.impl` |
-| `Nil` | `$List.tail.impl` |
-| `Node` | `$Node.tail.impl` |
-
-No parent traversal happens during a call.
-
-## 5. Constructors
-
-A `Nil` is constructed with its fixed descriptor:
+For a generic or hierarchy branch with no applicable method, the slot contains
+a generated function of the correct signature whose body is `unreachable`:
 
 ```wat
-(func $Nil.new
-  (param $sentinel i32)
-  (result (ref $Nil))
-
-  (struct.new $Nil
-    (global.get $Nil.tag.value)
-    (local.get $sentinel)))
-```
-
-A `Node` is constructed with the `Node` descriptor and its next pointer:
-
-```wat
-(func $Node.new
-  (param $next (ref $List))
-  (result (ref $Node))
-
-  (struct.new $Node
-    (global.get $Node.tag.value)
-    (local.get $next)))
-```
-
-## 6. The `tail` dispatcher
-
-This is the central expansion:
-
-```wat
-(func $List.tail.dispatch
-  (param $self (ref $List))
+(func $generic.tail.fallback
+  (type $generic.tail.sig)
+  (param $list (ref $List))
   (result (ref $List))
-
-  (return_call_ref $List.tail.sig
-    ;; Argument passed to the selected method.
-    (local.get $self)
-
-    ;; Function reference used by return_call_ref.
-    (struct.get $List.tag $tail
-      (struct.get $List $tag
-        (local.get $self)))))
+  (unreachable))
 ```
 
-Separated into conceptual steps:
+That makes empty and partial generics structurally valid without adding a
+runtime lookup or applicability protocol.
 
-```wat
-;; 1. Load self.tag.
-(local.set $descriptor
-  (struct.get $List $tag
-    (local.get $self)))
+## 5. Public dispatcher and call syntax
 
-;; 2. Load descriptor.tail.
-(local.set $implementation
-  (struct.get $List.tag $tail
-    (local.get $descriptor)))
-
-;; 3. Tail-call that implementation with self.
-(return_call_ref $List.tail.sig
-  (local.get $self)
-  (local.get $implementation))
-```
-
-The generated function uses nested expressions instead of actual locals.
-
-## 7. Call from the traversal loop
-
-The original source:
+Calls use the ordinary function syntax:
 
 ```lisp
-(set $cursor
-  (classes:call List tail $cursor))
+($tail $cursor)
 ```
 
-becomes:
+The public function has the generic's source name. It loads the receiver's tag,
+loads the fixed slot, and tail-calls the selected reference:
+
+```wat
+(func $tail
+  (param $list (ref $List))
+  (result (ref $List))
+  (return_call_ref $generic.tail.sig
+    (local.get $list)
+    (struct.get $List.tag $generic.tail
+      (struct.get $List $tag
+        (local.get $list)))))
+```
+
+A call from `typed-defun` therefore lowers like any other known direct call:
 
 ```wat
 (local.set $cursor
-  (call $List.tail.dispatch
+  (call $tail
     (local.get $cursor)))
 ```
 
-Within the complete loop:
+The indirect operation remains inside `$tail`. Its runtime work is two fixed
+field loads and one `return_call_ref`.
+
+## 6. `call-next-method`
+
+Within a method, the compiler precomputes the nearest strict ancestor class
+that locally defines the same generic. A source call:
+
+```lisp
+(call-next-method $object $new-value)
+```
+
+is lowered directly to that implementation with the complete supplied argument
+list:
 
 ```wat
-(func $count
-  (param $list (ref $List))
-  (result i32)
-
-  (local $length i32)
-  (local $cursor (ref $List))
-
-  (local.set $length
-    (i32.const 0))
-
-  (local.set $cursor
-    (local.get $list))
-
-  (block $done
-    (loop $again
-      ;; Dynamically dispatch is-empty.
-      (br_if $done
-        (call $List.is-empty.dispatch
-          (local.get $cursor)))
-
-      ;; Dynamically dispatch tail.
-      (local.set $cursor
-        (call $List.tail.dispatch
-          (local.get $cursor)))
-
-      (local.set $length
-        (i32.add
-          (local.get $length)
-          (i32.const 1)))
-
-      (br $again)))
-
-  (local.get $length))
+(call $generic.write.Counter.impl
+  (local.get $object)
+  (local.get $new-value))
 ```
 
-The resulting `tail` path is:
+Arguments are always required, including the receiver, and their count must
+equal the generic arity. The values replace the current method arguments. There
+is intentionally no redispatch and no applicability-preservation check. If no
+ancestor method exists, the statically selected target is the generic fallback.
+
+## 7. Runtime cost
+
+For `($tail $cursor)`, the generated path is:
 
 ```text
-$count
-  → direct call $List.tail.dispatch
-  → load cursor.tag
-  → load tag.tail at a fixed offset
-  → return_call_ref
-  → $Node.tail.impl
-  → cast cursor to Node
-  → load Node.next
+direct call $tail
+  -> load cursor.tag
+  -> load tag.$generic.tail at a fixed offset
+  -> return_call_ref selected implementation
 ```
 
-One correction to my earlier description: although the `tail` slot can resolve to either the base or Node implementation, this particular traversal checks `is-empty` first. It never calls `tail` on `Nil`. Therefore, the observed `tail` `call_ref` is normally monomorphic—only `$Node.tail.impl`. The `is-empty` dispatcher is the two-target polymorphic site.
+The Wasm engine may optimize the indirect site with its own inline cache. Idle
+does not maintain a language-level cache, method table, or ancestor search.

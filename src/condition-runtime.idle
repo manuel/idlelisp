@@ -1,12 +1,10 @@
 (module
-  (class condition)
-  (class error (extends condition))
-  (class simple-error
-    (extends error)
-    (field message (ref eq)))
-  (class restart-error
-    (extends error)
-    (field restart-name (ref eq)))
+  (defclass condition)
+  (defclass error (condition))
+  (defclass simple-error (error)
+    (message (ref eq)))
+  (defclass restart-error (error)
+    (restart-name (ref eq)))
 
   (import "idle" "nil"
     (func $condition.nil (result (ref eq))))

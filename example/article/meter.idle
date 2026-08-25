@@ -1,23 +1,24 @@
 (module
-  (class Meter
-    (field value i32)
-    (method reading ()
-      (result i32)
-      (classes:get Meter value $this)))
+  (defclass Meter ()
+    (value i32))
 
-  (class CalibratedMeter
-    (extends Meter)
-    (field correction i32)
-    (override reading ()
-      (result i32)
-      (demo:double
-        (i32.add
-          (classes:super-call CalibratedMeter reading $this)
-          (classes:get CalibratedMeter correction $this)))))
+  (defclass CalibratedMeter (Meter)
+    (correction i32))
+
+  (defgeneric $reading ((meter Meter) i32))
+
+  (defmethod $reading ((meter Meter) i32)
+    (classes:get Meter value $meter))
+
+  (defmethod $reading ((meter CalibratedMeter) i32)
+    (demo:double
+      (i32.add
+        (call-next-method $meter)
+        (classes:get CalibratedMeter correction $meter))))
 
   (typed-defun $main (i32)
     (let $meter Meter
       ($CalibratedMeter.new 17 5))
-    (.reading $meter))
+    ($reading $meter))
 
   (export-func main))

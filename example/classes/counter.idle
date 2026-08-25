@@ -1,14 +1,18 @@
 (module
-(class Counter
-  (field value (mut i32))
-  (method read ()
-    (result i32)
-    (classes:get Counter value $this))
-  (method write ((value i32))
-    (result)
-    (classes:set Counter value $this $value)))
+(defclass Counter ()
+  (value (mut i32)))
+
+(defgeneric $read ((object Counter) i32))
+(defgeneric $write ((object Counter) (value i32) i32))
+
+(defmethod $read ((object Counter) i32)
+  (classes:get Counter value $object))
+
+(defmethod $write ((object Counter) (value i32) i32)
+  (classes:set Counter value $object $value)
+  (i32.const 0))
 
 (export-new Counter)
-(export-method Counter read)
-(export-method Counter write)
+(export-func read)
+(export-func write)
 )

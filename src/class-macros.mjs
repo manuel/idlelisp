@@ -21,11 +21,13 @@ export function createClassMacroHost({ wasm, internPlain, symbolLocalName }) {
     return result;
   }
 
-  function listValues(value) {
+  function listValues(value, sourceIndex) {
     const result = [];
     let cursor = value;
     while (!wasm.abi_is_nil(cursor)) {
-      if (!wasm.abi_is_cons(cursor)) fail("EXPECTED_PROPER_LIST", "expected a proper list");
+      if (!wasm.abi_is_cons(cursor)) {
+        fail("EXPECTED_PROPER_LIST", "expected a proper list", sourceIndex);
+      }
       result.push(wasm.abi_car(cursor));
       cursor = wasm.abi_cdr(cursor);
     }
@@ -97,11 +99,11 @@ export function createClassMacroHost({ wasm, internPlain, symbolLocalName }) {
   }
 
   function parseField(values, sourceIndex, seen) {
-    requireLength(values, 3, "INVALID_FIELD", "field requires a name and type", sourceIndex);
-    const name = identifier(values[1], sourceIndex, "field");
+    requireLength(values, 2, "INVALID_FIELD", "field requires a name and type", sourceIndex);
+    const name = identifier(values[0], sourceIndex, "field");
     if (seen.has(name)) fail("DUPLICATE_FIELD", `duplicate field ${name}`, sourceIndex);
     seen.add(name);
-    let storageType = values[2];
+    let storageType = values[1];
     let valueType = storageType;
     let mutable = false;
     if (headName(storageType) === "mut") {
@@ -120,90 +122,85 @@ export function createClassMacroHost({ wasm, internPlain, symbolLocalName }) {
       requireLength(parts, 2, "INVALID_PARAMETER", "parameter requires a name and type", sourceIndex);
       const name = identifier(parts[0], sourceIndex, "parameter");
       if (seen.has(name)) fail("DUPLICATE_PARAMETER", `duplicate parameter ${name}`, sourceIndex);
-      if (name === "self" || name === "this") {
-        fail("RESERVED_PARAMETER", `parameter ${name} is reserved`, sourceIndex);
-      }
       seen.add(name);
       return { name, type: parts[1] };
     });
   }
 
-  function parseMethod(values, sourceIndex, seen) {
-    if (values.length < 4) fail("INVALID_METHOD", "method is missing its signature", sourceIndex);
-    const name = identifier(values[1], sourceIndex, "method");
-    if (seen.has(name)) fail("DUPLICATE_METHOD", `duplicate method ${name}`, sourceIndex);
-    seen.add(name);
-    const parameters = parseParameters(values[2], sourceIndex);
-    const resultParts = listValues(values[3]);
-    if (resultParts.length === 0
-        || localName(resultParts[0], sourceIndex, "result clause") !== "result") {
-      fail("INVALID_METHOD_RESULT", `method ${name} requires a result clause`, sourceIndex);
+  function parseGenericSignature(value, sourceIndex, role) {
+    const values = listValues(value);
+    if (values.length < 2) {
+      fail(
+        "INVALID_GENERIC_SIGNATURE",
+        `${role} requires at least one parameter and exactly one result`,
+        sourceIndex,
+      );
     }
     return {
-      name,
-      parameters,
-      results: resultParts.slice(1),
-      body: values.slice(4),
-      sourceIndex,
+      parameters: parseParameters(list(...values.slice(0, -1)), sourceIndex),
+      result: values.at(-1),
     };
   }
 
-  function parseOverride(values, sourceIndex, seen) {
-    if (values.length < 4) {
-      fail("INVALID_OVERRIDE", "override requires a method name, parameters, and result", sourceIndex);
+  function parseGeneric(form, sourceIndex, generics, sourceOrder) {
+    const values = listValues(form);
+    requireLength(
+      values,
+      3,
+      "INVALID_DEFGENERIC",
+      "defgeneric requires a $function name and signature list",
+      sourceIndex,
+    );
+    const name = functionIdentifier(values[1], sourceIndex, "generic function");
+    if (generics.has(name)) fail("DUPLICATE_GENERIC", `duplicate generic ${name}`, sourceIndex);
+    const signature = parseGenericSignature(values[2], sourceIndex, `generic ${name}`);
+    const generic = { name, ...signature, sourceIndex, sourceOrder, methods: new Map() };
+    generics.set(name, generic);
+    return generic;
+  }
+
+  function parseGenericMethod(form, sourceIndex) {
+    const values = listValues(form);
+    if (values.length < 3) {
+      fail(
+        "INVALID_DEFMETHOD",
+        "defmethod requires a $generic name, signature list, and optional body",
+        sourceIndex,
+      );
     }
-    const name = identifier(values[1], sourceIndex, "override");
-    if (seen.has(name)) fail("DUPLICATE_METHOD", `duplicate method ${name}`, sourceIndex);
-    seen.add(name);
-    const parameters = parseParameters(values[2], sourceIndex);
-    const resultParts = listValues(values[3]);
-    if (resultParts.length === 0
-        || localName(resultParts[0], sourceIndex, "result clause") !== "result") {
-      fail("INVALID_OVERRIDE_RESULT", `override ${name} requires a result clause`, sourceIndex);
-    }
+    const name = functionIdentifier(values[1], sourceIndex, "generic method");
     return {
       name,
-      parameters,
-      results: resultParts.slice(1),
-      body: values.slice(4),
+      ...parseGenericSignature(values[2], sourceIndex, `method ${name}`),
+      body: values.slice(3),
       sourceIndex,
     };
   }
 
   function parseClass(form, sourceIndex, classes) {
-    const values = listValues(form);
-    if (values.length < 2) fail("INVALID_CLASS", "class requires a name", sourceIndex);
+    const values = listValues(form, sourceIndex);
+    if (values.length < 2) fail("INVALID_DEFCLASS", "defclass requires a name", sourceIndex);
     const name = identifier(values[1], sourceIndex, "class");
     if (classes.has(name)) fail("DUPLICATE_CLASS", `duplicate class ${name}`, sourceIndex);
     const fields = [];
-    const methods = [];
-    const overrides = [];
     const fieldNames = new Set();
-    const methodNames = new Set();
     let parentName;
-    for (const clause of values.slice(2)) {
-      const parts = listValues(clause);
-      const clauseName = localName(parts[0], sourceIndex, "class clause");
-      if (clauseName === "extends") {
-        requireLength(parts, 2, "INVALID_EXTENDS", "extends requires one parent", sourceIndex);
-        if (parentName !== undefined) fail("DUPLICATE_EXTENDS", `class ${name} has multiple parents`, sourceIndex);
-        parentName = identifier(parts[1], sourceIndex, "parent class");
-      } else if (clauseName === "field") {
-        fields.push(parseField(parts, sourceIndex, fieldNames));
-      } else if (clauseName === "method") {
-        methods.push(parseMethod(parts, sourceIndex, methodNames));
-      } else if (clauseName === "override") {
-        overrides.push(parseOverride(parts, sourceIndex, methodNames));
-      } else {
-        fail("UNKNOWN_CLASS_CLAUSE", `unknown class clause ${clauseName}`, sourceIndex);
+    if (values.length > 2) {
+      const superclasses = listValues(values[2], sourceIndex);
+      if (superclasses.length > 1) {
+        fail("MULTIPLE_SUPERCLASSES", `class ${name} may have at most one superclass`, sourceIndex);
+      }
+      if (superclasses.length === 1) {
+        parentName = identifier(superclasses[0], sourceIndex, "parent class");
+      }
+      for (const field of values.slice(3)) {
+        fields.push(parseField(listValues(field, sourceIndex), sourceIndex, fieldNames));
       }
     }
     const result = {
       name,
       parentName,
       fields,
-      methods,
-      overrides,
       sourceIndex,
       status: "new",
     };
@@ -236,40 +233,6 @@ export function createClassMacroHost({ wasm, internPlain, symbolLocalName }) {
       inheritedFields.add(field.name);
     }
 
-    classInfo.slots = parent === undefined
-      ? []
-      : parent.slots.map((slot) => ({ ...slot }));
-    classInfo.implementations = [];
-    for (const method of classInfo.methods) {
-      if (classInfo.slots.some((slot) => slot.name === method.name)) {
-        fail("METHOD_NEEDS_OVERRIDE", `${method.name} must use override`, method.sourceIndex);
-      }
-      const slot = {
-        name: method.name,
-        introducer: classInfo,
-        parameters: method.parameters,
-        results: method.results,
-        implementation: classInfo,
-        body: method.body,
-      };
-      classInfo.slots.push(slot);
-      classInfo.implementations.push(slot);
-    }
-    for (const override of classInfo.overrides) {
-      const index = classInfo.slots.findIndex((slot) => slot.name === override.name);
-      if (index < 0) {
-        fail("UNKNOWN_OVERRIDE", `cannot override unknown method ${override.name}`, override.sourceIndex);
-      }
-      const inherited = classInfo.slots[index];
-      const replacement = {
-        ...inherited,
-        implementation: classInfo,
-        body: override.body,
-        override,
-      };
-      classInfo.slots[index] = replacement;
-      classInfo.implementations.push(replacement);
-    }
     classInfo.status = "done";
     ordered.push(classInfo);
   }
@@ -353,71 +316,151 @@ export function createClassMacroHost({ wasm, internPlain, symbolLocalName }) {
           ? list(symbol("mut"), type.wat)
           : type.wat;
       }
-      for (const method of classInfo.methods) {
-        for (const parameter of method.parameters) {
-          const type = normalizeDeclarationType(
-            parameter.type,
-            classes,
-            method.sourceIndex,
-            `parameter ${method.name}.${parameter.name}`,
-          );
-          parameter.checkedType = type.checked;
-          parameter.type = type.wat;
-        }
-        method.results.forEach((value, index) => {
-          method.results[index] = normalizeDeclarationType(
-            value,
-            classes,
-            method.sourceIndex,
-            `result of ${classInfo.name}.${method.name}`,
-          ).wat;
-        });
+    }
+  }
+
+  function isSubclass(classInfo, ancestor) {
+    let cursor = classInfo;
+    while (cursor !== undefined) {
+      if (cursor === ancestor) return true;
+      cursor = cursor.parent;
+    }
+    return false;
+  }
+
+  function normalizeParameter(parameter, classes, sourceIndex, role, required = false) {
+    const type = normalizeDeclarationType(parameter.type, classes, sourceIndex, role);
+    if (required && type.checked?.kind !== "class") {
+      fail("INVALID_DISPATCH_TYPE", `${role} must be a declared non-null class`, sourceIndex);
+    }
+    parameter.checkedType = type.checked;
+    parameter.type = type.wat;
+  }
+
+  function resolveGenerics(generics, methodItems, ordered, classes) {
+    const genericList = [...generics.values()];
+    for (const generic of genericList) {
+      generic.parameters.forEach((parameter, index) => normalizeParameter(
+        parameter,
+        classes,
+        generic.sourceIndex,
+        `parameter ${generic.name}.${parameter.name}`,
+        index === 0,
+      ));
+      generic.dispatchClass = generic.parameters[0].checkedType.classInfo;
+      const resultType = normalizeDeclarationType(
+        generic.result,
+        classes,
+        generic.sourceIndex,
+        `result of ${generic.name}`,
+      );
+      generic.checkedResult = resultType.checked;
+      generic.result = resultType.wat;
+    }
+
+    const methods = methodItems.map((item) => parseGenericMethod(item.form, item.sourceIndex));
+    for (const method of methods) {
+      const generic = generics.get(method.name);
+      if (generic === undefined) {
+        fail("UNKNOWN_GENERIC", `unknown generic ${method.name}`, method.sourceIndex);
       }
-      for (const override of classInfo.overrides) {
-        for (const parameter of override.parameters) {
-          const type = normalizeDeclarationType(
-            parameter.type,
-            classes,
-            override.sourceIndex,
-            `parameter ${override.name}.${parameter.name}`,
-          );
-          parameter.checkedType = type.checked;
-          parameter.type = type.wat;
-        }
-        override.results = override.results.map((value) => normalizeDeclarationType(
-          value,
-          classes,
-          override.sourceIndex,
-          `result of ${classInfo.name}.${override.name}`,
-        ).wat);
+      if (method.parameters.length !== generic.parameters.length) {
+        fail(
+          "METHOD_SIGNATURE_MISMATCH",
+          `method ${method.name} must exactly match the generic arity`,
+          method.sourceIndex,
+        );
       }
-      for (const slot of classInfo.slots) {
-        slot.checkedParameters = slot.parameters.map((parameter) => parameter.checkedType);
-        slot.checkedResults = slot.results.map((value) => checkedTypeFromDatum(
-          value,
-          classes,
-          slot.introducer.sourceIndex,
-          `result of ${slot.introducer.name}.${slot.name}`,
-        ));
-        if (slot.override === undefined) continue;
-        const override = slot.override;
-        const parametersMatch = override.parameters.length === slot.parameters.length
-          && override.parameters.every((parameter, index) => (
-            datumTypeKey(parameter.type) === datumTypeKey(slot.parameters[index].type)
-          ));
-        const resultsMatch = override.results.length === slot.results.length
-          && override.results.every((value, index) => (
-            datumTypeKey(value) === datumTypeKey(slot.results[index])
-          ));
-        if (!parametersMatch || !resultsMatch) {
-          fail(
-            "OVERRIDE_SIGNATURE_MISMATCH",
-            `override ${classInfo.name}.${slot.name} must exactly match its inherited signature`,
-            override.sourceIndex,
-          );
+      method.parameters.forEach((parameter, index) => normalizeParameter(
+        parameter,
+        classes,
+        method.sourceIndex,
+        `parameter ${method.name}.${parameter.name}`,
+        index === 0,
+      ));
+      const resultType = normalizeDeclarationType(
+        method.result,
+        classes,
+        method.sourceIndex,
+        `result of ${method.name}`,
+      );
+      method.checkedResult = resultType.checked;
+      method.result = resultType.wat;
+      method.generic = generic;
+      method.specializer = method.parameters[0].checkedType.classInfo;
+      if (!isSubclass(method.specializer, generic.dispatchClass)) {
+        fail(
+          "UNRELATED_METHOD_SPECIALIZER",
+          `${method.specializer.name} does not extend ${generic.dispatchClass.name}`,
+          method.sourceIndex,
+        );
+      }
+      const parametersMatch = method.parameters.slice(1).every((parameter, index) => (
+        datumTypeKey(parameter.type) === datumTypeKey(generic.parameters[index + 1].type)
+      ));
+      if (!parametersMatch || datumTypeKey(method.result) !== datumTypeKey(generic.result)) {
+        fail(
+          "METHOD_SIGNATURE_MISMATCH",
+          `method ${method.name} must exactly match its generic signature`,
+          method.sourceIndex,
+        );
+      }
+      if (generic.methods.has(method.specializer.name)) {
+        fail(
+          "DUPLICATE_METHOD",
+          `duplicate method ${method.name} for ${method.specializer.name}`,
+          method.sourceIndex,
+        );
+      }
+      generic.methods.set(method.specializer.name, method);
+    }
+
+    for (const classInfo of ordered) {
+      classInfo.slots = classInfo.parent === undefined
+        ? []
+        : classInfo.parent.slots.map((slot) => ({ ...slot }));
+      classInfo.implementations = [];
+      for (const generic of genericList) {
+        if (generic.dispatchClass === classInfo) {
+          classInfo.slots.push({ generic, implementation: generic });
         }
+      }
+      for (const generic of genericList) {
+        const method = generic.methods.get(classInfo.name);
+        if (method === undefined) continue;
+        const index = classInfo.slots.findIndex((slot) => slot.generic === generic);
+        if (index < 0) fail("INTERNAL_GENERIC_SLOT", `missing slot for ${generic.name}`);
+        classInfo.slots[index] = { generic, implementation: method };
+        classInfo.implementations.push(method);
       }
     }
+
+    for (const method of methods) {
+      let cursor = method.specializer.parent;
+      while (cursor !== undefined && method.generic.methods.get(cursor.name) === undefined) {
+        cursor = cursor.parent;
+      }
+      method.next = cursor === undefined ? method.generic : method.generic.methods.get(cursor.name);
+      method.loweredBody = method.body.map((value) => lowerNextMethod(value, method));
+    }
+    return { genericList, methods };
+  }
+
+  function lowerNextMethod(value, method) {
+    if (!wasm.abi_is_cons(value)) return value;
+    const values = listValues(value);
+    if (headName(value) === "quote") return value;
+    if (headName(value) === "call-next-method") {
+      if (values.length !== method.generic.parameters.length + 1) {
+        fail(
+          "CALL_NEXT_METHOD_ARITY",
+          `call-next-method for ${method.name} requires ${method.generic.parameters.length} arguments`,
+          method.sourceIndex,
+        );
+      }
+      return list(symbol("call"), implementationId(method.next), ...values.slice(1));
+    }
+    return list(...values.map((item) => lowerNextMethod(item, method)));
   }
 
   function parseTypedFunction(item, classes) {
@@ -596,44 +639,11 @@ export function createClassMacroHost({ wasm, internPlain, symbolLocalName }) {
         return { type: i32, form: list(symbol("i32.eqz"), operand.form) };
       }
       if (/^\.[A-Za-z_][A-Za-z0-9_-]*$/.test(name)) {
-        if (values.length < 2) {
-          fail("INVALID_TYPED_SEND", `${name} requires a receiver`, functionInfo.sourceIndex);
-        }
-        const receiver = checkExpression(values[1]);
-        if (receiver.type.kind !== "class") {
-          fail("NON_CLASS_RECEIVER", `${name} receiver must have a class type`, functionInfo.sourceIndex);
-        }
-        const methodName = name.slice(1);
-        const slot = receiver.type.classInfo.slots.find((candidate) => candidate.name === methodName);
-        if (slot === undefined) {
-          fail(
-            "UNKNOWN_TYPED_METHOD",
-            `unknown method ${receiver.type.classInfo.name}.${methodName}`,
-            functionInfo.sourceIndex,
-          );
-        }
-        if (slot.checkedParameters.some((type) => type === undefined)
-            || slot.checkedResults.length !== 1
-            || slot.checkedResults[0] === undefined) {
-          fail(
-            "UNCHECKED_METHOD_SIGNATURE",
-            `${receiver.type.classInfo.name}.${methodName} does not have a checked signature`,
-            functionInfo.sourceIndex,
-          );
-        }
-        const parameters = slot.parameters.map((parameter, index) => ({
-          name: parameter.name,
-          type: slot.checkedParameters[index],
-        }));
-        const arguments_ = checkArguments(
-          values.slice(2),
-          parameters,
-          `${receiver.type.classInfo.name}.${methodName}`,
+        fail(
+          "METHOD_SEND_SYNTAX_REMOVED",
+          `${name} has been replaced by an ordinary $generic call with the receiver first`,
+          functionInfo.sourceIndex,
         );
-        return {
-          type: slot.checkedResults[0],
-          form: list(symbol("call"), dispatcherId(slot), receiver.form, ...arguments_),
-        };
       }
       if (name.startsWith("$")) {
         const constructorMatch = /^\$([A-Za-z_][A-Za-z0-9_-]*)\.new$/.exec(name);
@@ -795,16 +805,22 @@ export function createClassMacroHost({ wasm, internPlain, symbolLocalName }) {
     return list(symbol("local.get"), id(name));
   }
 
-  function signatureId(slot) {
-    return id(`${slot.introducer.name}.${slot.name}.sig`);
+  function genericStem(value) {
+    const generic = value.generic ?? value;
+    return generic.name.slice(1);
   }
 
-  function implementationId(slot) {
-    return id(`${slot.implementation.name}.${slot.name}.impl`);
+  function signatureId(value) {
+    return id(`generic.${genericStem(value)}.sig`);
   }
 
-  function dispatcherId(slot) {
-    return id(`${slot.introducer.name}.${slot.name}.dispatch`);
+  function implementationId(value) {
+    if (value.generic === undefined) return id(`generic.${genericStem(value)}.fallback`);
+    return id(`generic.${genericStem(value)}.${value.specializer.name}.impl`);
+  }
+
+  function slotFieldId(generic) {
+    return id(`generic.${genericStem(generic)}`);
   }
 
   function conditionMatcherId(classInfo) {
@@ -877,16 +893,16 @@ export function createClassMacroHost({ wasm, internPlain, symbolLocalName }) {
 
   function emitClassTypes(classInfo) {
     const types = [];
-    for (const method of classInfo.methods) {
-      const slot = classInfo.slots.find((candidate) => candidate.name === method.name);
+    for (const slot of classInfo.slots) {
+      const generic = slot.generic;
+      if (generic.dispatchClass !== classInfo) continue;
       types.push(list(
         symbol("type"),
-        signatureId(slot),
+        signatureId(generic),
         list(
           symbol("func"),
-          param("self", ref(classInfo.name)),
-          ...method.parameters.map((item) => param(item.name, item.type)),
-          ...resultForms(method.results),
+          ...generic.parameters.map((item) => param(item.name, item.type)),
+          result([generic.result]),
         ),
       ));
     }
@@ -895,8 +911,8 @@ export function createClassMacroHost({ wasm, internPlain, symbolLocalName }) {
       list(symbol("field"), id("classes.parent-tag"), nullableRef("tag")),
       ...classInfo.slots.map((slot) => list(
         symbol("field"),
-        id(slot.name),
-        list(symbol("ref"), signatureId(slot)),
+        slotFieldId(slot.generic),
+        list(symbol("ref"), signatureId(slot.generic)),
       )),
     ];
     types.push(list(
@@ -917,22 +933,34 @@ export function createClassMacroHost({ wasm, internPlain, symbolLocalName }) {
     return list(symbol("rec"), ...types);
   }
 
-  function emitImplementation(classInfo, slot) {
-    const introducer = slot.introducer;
+  function emitImplementation(method) {
+    const generic = method.generic;
+    const receiver = method.parameters[0];
     return list(
       symbol("func"),
-      implementationId(slot),
-      list(symbol("type"), signatureId(slot)),
-      param("self", ref(introducer.name)),
-      ...slot.parameters.map((item) => param(item.name, item.type)),
-      ...resultForms(slot.results),
-      list(symbol("local"), id("this"), ref(classInfo.name)),
+      implementationId(method),
+      list(symbol("type"), signatureId(generic)),
+      param("generic.receiver", generic.parameters[0].type),
+      ...method.parameters.slice(1).map((item) => param(item.name, item.type)),
+      result([generic.result]),
+      list(symbol("local"), id(receiver.name), receiver.type),
       list(
         symbol("local.set"),
-        id("this"),
-        list(symbol("ref.cast"), ref(classInfo.name), localGet("self")),
+        id(receiver.name),
+        list(symbol("ref.cast"), receiver.type, localGet("generic.receiver")),
       ),
-      ...slot.body,
+      ...method.loweredBody,
+    );
+  }
+
+  function emitFallback(generic) {
+    return list(
+      symbol("func"),
+      implementationId(generic),
+      list(symbol("type"), signatureId(generic)),
+      ...generic.parameters.map((item) => param(item.name, item.type)),
+      result([generic.result]),
+      list(symbol("unreachable")),
     );
   }
 
@@ -947,7 +975,7 @@ export function createClassMacroHost({ wasm, internPlain, symbolLocalName }) {
         classInfo.parent === undefined
           ? list(symbol("ref.null"), id("tag"))
           : list(symbol("global.get"), id(`${classInfo.parent.name}.tag.value`)),
-        ...classInfo.slots.map((slot) => list(symbol("ref.func"), implementationId(slot))),
+        ...classInfo.slots.map((slot) => list(symbol("ref.func"), implementationId(slot.implementation))),
       ),
     );
   }
@@ -967,24 +995,23 @@ export function createClassMacroHost({ wasm, internPlain, symbolLocalName }) {
     );
   }
 
-  function emitDispatcher(slot) {
-    const owner = slot.introducer;
+  function emitDispatcher(generic) {
+    const owner = generic.dispatchClass;
+    const receiver = generic.parameters[0];
     return list(
       symbol("func"),
-      dispatcherId(slot),
-      param("self", ref(owner.name)),
-      ...slot.parameters.map((item) => param(item.name, item.type)),
-      ...resultForms(slot.results),
+      symbol(generic.name),
+      ...generic.parameters.map((item) => param(item.name, item.type)),
+      result([generic.result]),
       list(
         symbol("return_call_ref"),
-        signatureId(slot),
-        localGet("self"),
-        ...slot.parameters.map((item) => localGet(item.name)),
+        signatureId(generic),
+        ...generic.parameters.map((item) => localGet(item.name)),
         list(
           symbol("struct.get"),
           id(`${owner.name}.tag`),
-          id(slot.name),
-          list(symbol("struct.get"), id(owner.name), id("tag"), localGet("self")),
+          slotFieldId(generic),
+          list(symbol("struct.get"), id(owner.name), id("tag"), localGet(receiver.name)),
         ),
       ),
     );
@@ -1011,13 +1038,25 @@ export function createClassMacroHost({ wasm, internPlain, symbolLocalName }) {
     }
 
     const classes = new Map();
+    const generics = new Map();
+    const methodItems = [];
     const rawFields = [];
     const typedFunctionItems = [];
     const exports = [];
-    for (const item of sourceForms) {
+    for (const [sourceOrder, item] of sourceForms.entries()) {
       const name = headName(item.form);
-      if (name === "class") {
+      if (name === "defclass") {
         parseClass(item.form, item.sourceIndex, classes);
+      } else if (name === "class") {
+        fail(
+          "CLASS_SYNTAX_REMOVED",
+          "class has been replaced by defclass with a superclass list and direct field declarations",
+          item.sourceIndex,
+        );
+      } else if (name === "defgeneric") {
+        parseGeneric(item.form, item.sourceIndex, generics, sourceOrder);
+      } else if (name === "defmethod") {
+        methodItems.push(item);
       } else if (name === "typed-defun") {
         typedFunctionItems.push(item);
       } else if (name === "export-new" || name === "export-method" || name === "export-func") {
@@ -1030,8 +1069,23 @@ export function createClassMacroHost({ wasm, internPlain, symbolLocalName }) {
     const ordered = [];
     for (const classInfo of classes.values()) resolveClass(classInfo, classes, ordered);
     normalizeClassDeclarations(ordered, classes);
+    const { genericList } = resolveGenerics(generics, methodItems, ordered, classes);
     const functions = new Map();
     const declaredFunctionNames = new Set();
+    for (const generic of genericList) {
+      declaredFunctionNames.add(generic.name);
+      if (generic.parameters.every((parameter) => parameter.checkedType !== undefined)
+          && generic.checkedResult !== undefined) {
+        functions.set(generic.name, {
+          name: generic.name,
+          parameters: generic.parameters.map((parameter) => ({
+            name: parameter.name,
+            type: parameter.checkedType,
+          })),
+          resultType: generic.checkedResult,
+        });
+      }
+    }
     for (const item of rawFields) {
       if (headName(item.form) !== "defun") continue;
       const values = listValues(item.form);
@@ -1067,17 +1121,11 @@ export function createClassMacroHost({ wasm, internPlain, symbolLocalName }) {
         externalNames.add(external);
         exportFields.push(emitExport(external, id(`${name}.new`)));
       } else if (item.kind === "export-method") {
-        requireLength(item.values, 3, "INVALID_EXPORT", "export-method requires class and method", item.sourceIndex);
-        const className = identifier(item.values[1], item.sourceIndex, "export class");
-        const methodName = identifier(item.values[2], item.sourceIndex, "export method");
-        const classInfo = classes.get(className);
-        if (classInfo === undefined) fail("UNKNOWN_EXPORT_CLASS", `unknown class ${className}`, item.sourceIndex);
-        const slot = classInfo.slots.find((candidate) => candidate.name === methodName);
-        if (slot === undefined) fail("UNKNOWN_EXPORT_METHOD", `unknown method ${className}.${methodName}`, item.sourceIndex);
-        const external = `${className}.${methodName}`;
-        if (externalNames.has(external)) fail("DUPLICATE_EXPORT", `duplicate export ${external}`, item.sourceIndex);
-        externalNames.add(external);
-        exportFields.push(emitExport(external, dispatcherId(slot)));
+        fail(
+          "EXPORT_METHOD_SYNTAX_REMOVED",
+          "export-method has been replaced by export-func for generic functions",
+          item.sourceIndex,
+        );
       } else {
         requireLength(item.values, 2, "INVALID_EXPORT", "export-func requires a function", item.sourceIndex);
         const name = identifier(item.values[1], item.sourceIndex, "export function");
@@ -1117,10 +1165,14 @@ export function createClassMacroHost({ wasm, internPlain, symbolLocalName }) {
       }
     }
     const implementationIds = [];
+    for (const generic of genericList) {
+      moduleFields.push(emitFallback(generic));
+      implementationIds.push(implementationId(generic));
+    }
     for (const classInfo of ordered) {
-      for (const slot of classInfo.implementations) {
-        moduleFields.push(emitImplementation(classInfo, slot));
-        implementationIds.push(implementationId(slot));
+      for (const method of classInfo.implementations) {
+        moduleFields.push(emitImplementation(method));
+        implementationIds.push(implementationId(method));
       }
     }
     if (implementationIds.length > 0) {
@@ -1128,11 +1180,7 @@ export function createClassMacroHost({ wasm, internPlain, symbolLocalName }) {
     }
     for (const classInfo of ordered) moduleFields.push(emitDescriptor(classInfo));
     for (const classInfo of ordered) moduleFields.push(emitConstructor(classInfo));
-    for (const classInfo of ordered) {
-      for (const method of classInfo.methods) {
-        moduleFields.push(emitDispatcher(classInfo.slots.find((slot) => slot.name === method.name)));
-      }
-    }
+    for (const generic of genericList) moduleFields.push(emitDispatcher(generic));
     moduleFields.push(...nonImportFields, ...loweredTypedFunctions, ...exportFields);
     return list(symbol("module"), ...moduleFields);
   }
@@ -1146,34 +1194,11 @@ export function createClassMacroHost({ wasm, internPlain, symbolLocalName }) {
     const values = listValues(form);
     if (values.length < expectedLength) fail("INVALID_CLASS_OPERATION", `${operation} has too few operands`);
     const className = identifier(values[1], undefined, "class");
-    const memberName = identifier(values[2], undefined, operation === "get" || operation === "set" ? "field" : "method");
+    const memberName = identifier(values[2], undefined, "field");
     const compilerState = requireState();
     const classInfo = compilerState.classes.get(className);
     if (classInfo === undefined) fail("UNKNOWN_CLASS", `unknown class ${className}`);
     return { values, classInfo, className, memberName };
-  }
-
-  function callMacro(form, tail = false) {
-    const { values, classInfo, memberName } = resolveHelper(form, 4, tail ? "return-call" : "call");
-    const slot = classInfo.slots.find((candidate) => candidate.name === memberName);
-    if (slot === undefined) fail("UNKNOWN_METHOD", `unknown method ${classInfo.name}.${memberName}`, classInfo.sourceIndex);
-    const arguments_ = values.slice(4);
-    if (arguments_.length !== slot.parameters.length) {
-      fail("METHOD_ARITY", `${classInfo.name}.${memberName} expects ${slot.parameters.length} arguments`, classInfo.sourceIndex);
-    }
-    return list(symbol(tail ? "return_call" : "call"), dispatcherId(slot), values[3], ...arguments_);
-  }
-
-  function superCallMacro(form) {
-    const { values, classInfo, memberName } = resolveHelper(form, 4, "super-call");
-    if (classInfo.parent === undefined) fail("NO_SUPERCLASS", `${classInfo.name} has no superclass`, classInfo.sourceIndex);
-    const slot = classInfo.parent.slots.find((candidate) => candidate.name === memberName);
-    if (slot === undefined) fail("UNKNOWN_SUPER_METHOD", `unknown super method ${memberName}`, classInfo.sourceIndex);
-    const arguments_ = values.slice(4);
-    if (arguments_.length !== slot.parameters.length) {
-      fail("METHOD_ARITY", `${memberName} expects ${slot.parameters.length} arguments`, classInfo.sourceIndex);
-    }
-    return list(symbol("call"), implementationId(slot), values[3], ...arguments_);
   }
 
   function getMacro(form) {
@@ -1215,9 +1240,6 @@ export function createClassMacroHost({ wasm, internPlain, symbolLocalName }) {
 
   return {
     classes_module: moduleMacro,
-    classes_call: (form) => callMacro(form, false),
-    classes_return_call: (form) => callMacro(form, true),
-    classes_super_call: superCallMacro,
     classes_get: getMacro,
     classes_set: setMacro,
     condition_function: conditionFunction,

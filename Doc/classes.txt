@@ -1,57 +1,103 @@
 Idle class compiler
 
 `idlec [--macro NAME=PATH ...] INPUT.idle ... -o OUTPUT.wat` combines all
-inputs into one validated WebAssembly GC text module.  Supplying a subclass
-before its parent is allowed.  This is compile-time linking: separately
-compiled Wasm modules cannot extend one another's GC struct types directly.
-Every input contains one unnamed (module ...) form; the compiler flattens their
-fields in input order before resolving classes.
+inputs into one validated WebAssembly GC text module. Supplying a subclass
+before its parent is allowed. This is compile-time linking: separately compiled
+Wasm modules cannot extend one another's GC struct types directly. Every input
+contains one unnamed (module ...) form; the compiler flattens their fields in
+input order before resolving declarations.
 
-Declarations:
+Classes declare a zero-or-one-element superclass list followed by their own
+fields directly. A fieldless root may omit both:
 
-  (class Name
-    (extends Parent)
-    (field immutable-name i32)
-    (field mutable-name (mut i32))
-    (method read ((argument i32))
-      (result i32)
-      wat-instruction ...)
-    (override inherited-method ((argument i32))
-      (result i32)
-      wat-instruction ...))
+  (defclass Object)
 
-  (export-new Name)
-  (export-method Name read)
-  (export-func raw-wat-function)
+  (defclass Counter ()
+    (value (mut i32)))
 
-Method bodies contain WAT instruction S-expressions and receive `$this` plus
-their named parameters.  `classes:get`, `classes:set`, `classes:call`,
-`classes:return-call`, and `classes:super-call` lower field and method
-operations.  Other top-level forms are copied as raw WAT module fields.
+  (defclass OffsetCounter (Counter)
+    (offset i32))
 
-Overrides repeat the complete inherited parameter and result signature.  The
-compiler requires an exact match before installing the overriding
-implementation in the inherited method slot.
+The superclass list is always present when fields are declared; use `()` for a
+root. `(name Type)` is immutable and `(name (mut Type))` is mutable. The old
+`class`, `extends`, and `field` declaration syntax is not accepted.
 
-`typed-defun` uses the same signature-list shape as `defun`, but checks a small
-source language before lowering it to WAT:
+Generic functions and methods are top-level declarations. Their signature list
+has the same shape as `defun`: named parameters followed by one result type.
+Both forms always require at least one parameter and exactly one result.
+
+  (defgeneric $read ((object Counter) i32))
+  (defgeneric $write ((object Counter) (value i32) i32))
+
+  (defmethod $read ((object Counter) i32)
+    (classes:get Counter value $object))
+
+  (defmethod $write ((object Counter) (value i32) i32)
+    (classes:set Counter value $object $value)
+    (i32.const 0))
+
+  (defmethod $read ((object OffsetCounter) i32)
+    (i32.add
+      (call-next-method $object)
+      (classes:get OffsetCounter offset $object)))
+
+The first parameter is the explicit dispatch receiver. A method's receiver type
+must be the generic's declared class or one of its subclasses. All remaining
+parameter types and the result type must exactly match the generic declaration;
+parameter names may differ. There can be at most one method for a generic and
+receiver class.
+
+A generic call uses ordinary function syntax:
+
+  ($read $counter)
+
+The runtime class of the first argument selects the method. Descriptor slots
+make this an O(1) lookup. Classes with no local method inherit the nearest
+ancestor method. A generic may have no method at all, and may omit methods for
+parts of its hierarchy; dispatch through an uncovered class calls a generated
+fallback that traps.
+
+Inside a `defmethod`, `call-next-method` directly invokes the nearest method on
+a strict ancestor of the current receiver specializer. It always requires the
+complete argument list, even when the generic has only its receiver:
+
+  (call-next-method $object)
+  (call-next-method $object $new-value)
+
+The supplied values replace all current arguments. The call does not redispatch
+or check whether the new receiver would preserve applicability. If no ancestor
+method exists, the call reaches the generic's trapping fallback.
+
+Method bodies contain WAT instruction S-expressions and refer to their explicit
+named parameters; there is no implicit `$this`. `classes:get` and `classes:set`
+remain the field operations. The former class-local `(method ...)` and
+`(override ...)` declarations, `.method` call syntax, `export-method`, and the
+`classes:call`, `classes:return-call`, and `classes:super-call` macros have been
+removed.
+
+Exports use the ordinary constructor and function forms:
+
+  (export-new Counter)
+  (export-func read)
+  (export-func write)
+
+`typed-defun` uses the same signature-list shape and checks a small source
+language before lowering it to WAT:
 
   (typed-defun $length (($list List) i32)
     (let $cursor List $list)
     (let $length i32 0)
-    (while (i32.eqz (.is-empty $cursor))
-      (set $cursor (.tail $cursor))
+    (while (i32.eqz ($is-empty $cursor))
+      (set $cursor ($tail $cursor))
       (set $length (i32.add $length 1)))
     $length)
 
-Parameters, the single result, and locals are explicitly typed.  Checked types
+Parameters, the single result, and locals are explicitly typed. Checked types
 are `i32` and non-null class names such as `List`; class references flow to
-ancestor types.  `(.method receiver arguments...)` infers the method slot from
-the receiver's declared type and lowers through the existing virtual
-dispatcher.  The checked body also supports integer literals, direct function
-and constructor calls, `i32.add`, `i32.sub`, `i32.eqz`, `let`, `set`, and
-`while`.  Fields and raw method bodies retain the explicit `classes:*` forms.
-Use ordinary `defun` for unchecked WAT bodies.
+ancestor types. Ordinary `$name` calls are checked against a known `defun`,
+`typed-defun`, constructor, or `defgeneric` signature. The checked body also
+supports integer literals, `i32.add`, `i32.sub`, `i32.eqz`, `let`, `set`, and
+`while`. Use ordinary `defun` for unchecked WAT bodies.
 
 For example:
 

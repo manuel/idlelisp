@@ -12,7 +12,10 @@ const dynamicRuntimePath = new URL("dynamic-runtime.idle", import.meta.url);
 const conditionPath = new URL("condition.idle", import.meta.url);
 const conditionRuntimePath = new URL("condition-runtime.idle", import.meta.url);
 const CLASS_DSL_HEADS = new Set([
+  "defclass",
   "class",
+  "defgeneric",
+  "defmethod",
   "typed-defun",
   "export-new",
   "export-method",
@@ -401,6 +404,12 @@ function emitExpandedWat(idle, root, {
     } else if (kind === "cons") {
       const values = listValues(idle, task.value);
       const head = values.length === 0 ? undefined : plainSymbolName(idle, values[0]);
+      if (task.shorthand && head === "call-next-method") {
+        throw compilerError(
+          "CALL_NEXT_METHOD_OUTSIDE_METHOD",
+          "call-next-method is only valid in a defmethod body",
+        );
+      }
       if (task.shorthand && head === "if"
           && values.some((value) => plainHeadName(idle, value) === "elif")) {
         output.push(emitIfWithElif(idle, values, {

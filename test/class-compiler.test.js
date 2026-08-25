@@ -239,25 +239,53 @@ describe("Idle class compiler", () => {
     assert.include(wat, "(call $identity (i32.const 20))");
   });
 
-  it("checks typed constructors, nominal upcasts, and inherited methods", async () => {
+  it("accepts compact defclass roots, superclass lists, and direct fields", async () => {
+    const wat = await compileToWat({ sources: [source("defclass.idle", `
+      (defclass Root)
+      (defclass ExplicitRoot ())
+      (defclass Base ()
+        (value i32)
+        (count (mut i32)))
+      (defclass Child (Base)
+        (offset i32))
+      (export-new Root)
+      (export-new ExplicitRoot)
+      (export-new Base)
+      (export-new Child)
+    `)] });
+    const exports = await instantiate(wat);
+
+    assert.doesNotThrow(() => exports["Root.new"]());
+    assert.doesNotThrow(() => exports["ExplicitRoot.new"]());
+    assert.doesNotThrow(() => exports["Base.new"](1, 2));
+    assert.doesNotThrow(() => exports["Child.new"](1, 2, 3));
+    assert.include(
+      wat,
+      "(func $Child.new (param $value i32) (param $count i32) (param $offset i32)",
+    );
+    assert.include(wat, "(field $count (mut i32))");
+  });
+
+  it("checks typed constructors, nominal upcasts, and inherited generic methods", async () => {
     const wat = await compileToWat({ sources: [source("typed-objects.idle", `
-      (class A
-        (method value () (result i32) (i32.const 7)))
-      (class B (extends A))
+      (defclass A)
+      (defclass B (A))
+      (defgeneric $value ((object A) i32))
+      (defmethod $value ((object A) i32) (i32.const 7))
       (typed-defun $make (A)
         ($B.new))
       (typed-defun $read (i32)
-        (.value ($make)))
+        ($value ($make)))
       (export-func read)
     `)] });
     const exports = await instantiate(wat);
 
     assert.strictEqual(exports.read(), 7);
     assert.include(wat, "(call $B.new)");
-    assert.include(wat, "(call $A.value.dispatch (call $make))");
+    assert.include(wat, "(call $value (call $make))");
   });
 
-  it("infers virtual method dispatch from typed local declarations", async () => {
+  it("checks ordinary generic dispatch from typed local declarations", async () => {
     const wat = await compileFilesToWat({
       inputPaths: [new URL("../benchmark/oop-list.idle", import.meta.url)],
     });
@@ -266,8 +294,8 @@ describe("Idle class compiler", () => {
     assert.strictEqual(exports.count(exports.build(0)), 0);
     assert.strictEqual(exports.count(exports.build(1)), 1);
     assert.strictEqual(exports.count(exports.build(37)), 37);
-    assert.include(wat, "(call $List.is-empty.dispatch (local.get $cursor))");
-    assert.include(wat, "(call $List.tail.dispatch (local.get $cursor))");
+    assert.include(wat, "(call $is-empty (local.get $cursor))");
+    assert.include(wat, "(call $tail (local.get $cursor))");
     assert.include(wat, "(local $cursor (ref $List))");
   });
 
@@ -278,13 +306,13 @@ describe("Idle class compiler", () => {
       ["(typed-defun $bad (($value i32) i32) (set $value 1) $value)", "PARAMETER_ASSIGNMENT"],
       ["(typed-defun $bad (i32) (let $value i32 0) (let $value i32 1) $value)", "DUPLICATE_LOCAL"],
       ["(typed-defun $bad (i32) $missing)", "UNKNOWN_TYPED_LOCAL"],
-      ["(typed-defun $bad (($value i32) i32) (.tail $value))", "NON_CLASS_RECEIVER"],
-      ["(class A) (typed-defun $bad (($value A) i32) (.missing $value))", "UNKNOWN_TYPED_METHOD"],
-      ["(class A (method f ((value i32)) (result i32) $value)) (typed-defun $bad (($a A) i32) (.f $a))", "TYPED_CALL_ARITY"],
+      ["(typed-defun $bad (($value i32) i32) (.tail $value))", "METHOD_SEND_SYNTAX_REMOVED"],
+      ["(defclass A) (typed-defun $bad (($value A) i32) (.missing $value))", "METHOD_SEND_SYNTAX_REMOVED"],
+      ["(defclass A) (defgeneric $f ((a A) (value i32) i32)) (defmethod $f ((a A) (value i32) i32) $value) (typed-defun $bad (($a A) i32) ($f $a))", "TYPED_CALL_ARITY"],
       ["(typed-defun $bad (($value i32) i32) (i32.mul $value 2))", "UNSUPPORTED_TYPED_EXPRESSION"],
       ["(typed-defun $bad (($value i32) i32) (while $value (let $x i32 0)) 0)", "NESTED_TYPED_LOCAL"],
-      ["(class A) (class B (extends A)) (typed-defun $bad (($value A) B) $value)", "TYPE_MISMATCH"],
-      ["(class A (method f ((value i32)) (result i32) $value)) (class B (extends A) (override f () (result i32) (i32.const 0)))", "OVERRIDE_SIGNATURE_MISMATCH"],
+      ["(defclass A) (defclass B (A)) (typed-defun $bad (($value A) B) $value)", "TYPE_MISMATCH"],
+      ["(defclass A) (defclass B (A)) (defgeneric $f ((a A) (value i32) i32)) (defmethod $f ((b B) i32) (i32.const 0))", "METHOD_SIGNATURE_MISMATCH"],
     ];
 
     for (const [text, code] of cases) {
@@ -429,7 +457,7 @@ describe("Idle class compiler", () => {
     }
   });
 
-  it("compiles cross-file inheritance, virtual calls, super calls, and mutation", async () => {
+  it("compiles cross-file inheritance, generic calls, next methods, and mutation", async () => {
     const base = new URL("../example/classes/", import.meta.url);
     const wat = await compileFilesToWat({
       inputPaths: [
@@ -442,47 +470,121 @@ describe("Idle class compiler", () => {
 
     assert.strictEqual(exports.main(), 22);
     const counter = exports["Counter.new"](17);
-    assert.strictEqual(exports["Counter.read"](counter), 17);
-    exports["Counter.write"](counter, 31);
-    assert.strictEqual(exports["Counter.read"](counter), 31);
-    assert.match(wat, /\$Counter\.read\.dispatch/);
-    assert.notMatch(wat, /\$OffsetCounter\.read\.dispatch/);
+    assert.strictEqual(exports.read(counter), 17);
+    assert.strictEqual(exports.write(counter, 31), 0);
+    assert.strictEqual(exports.read(counter), 31);
+    assert.match(wat, /\(func \$read /);
+    assert.match(wat, /\$generic\.read\.OffsetCounter\.impl/);
   });
 
   it("supports virtual tail calls without growing the native stack", async () => {
     const wat = await compileToWat({ sources: [source("tail.idle", `
-      (class Countdown
-        (method run ((remaining i32))
-          (result i32)
-          (if (result i32)
-            (i32.eqz (local.get $remaining))
-            (then (i32.const 7))
-            (else
-              (classes:return-call Countdown run
-                (local.get $this)
-                (i32.sub (local.get $remaining) (i32.const 1)))))))
+      (defclass Countdown)
+      (defgeneric $run ((countdown Countdown) (remaining i32) i32))
+      (defmethod $run ((countdown Countdown) (remaining i32) i32)
+        (if (result i32)
+          (i32.eqz (local.get $remaining))
+          (then (i32.const 7))
+          (else
+            (return_call $run
+              (local.get $countdown)
+              (i32.sub (local.get $remaining) (i32.const 1))))))
       (export-new Countdown)
-      (export-method Countdown run)
+      (export-func run)
     `)] });
     const exports = await instantiate(wat);
 
-    assert.strictEqual(exports["Countdown.run"](exports["Countdown.new"](), 100_000), 7);
+    assert.strictEqual(exports.run(exports["Countdown.new"](), 100_000), 7);
+  });
+
+  it("passes explicit replacement arguments to the nearest next method", async () => {
+    const wat = await compileToWat({ sources: [source("next.idle", `
+      (defclass A)
+      (defclass B (A))
+      (defclass C (B))
+      (defmethod $value ((object C) (value i32) i32)
+        (call-next-method $object (i32.add $value (i32.const 5))))
+      (defgeneric $value ((object A) (value i32) i32))
+      (defmethod $value ((object A) (value i32) i32) $value)
+      (export-new C)
+      (export-func value)
+    `)] });
+    const exports = await instantiate(wat);
+
+    assert.strictEqual(exports.value(exports["C.new"](), 7), 12);
+    assert.include(wat, "(call $generic.value.A.impl (local.get $object)");
+  });
+
+  it("traps when a partial generic has no applicable method", async () => {
+    const wat = await compileToWat({ sources: [source("partial.idle", `
+      (defclass A)
+      (defclass B (A))
+      (defgeneric $value ((object A) i32))
+      (defmethod $value ((object B) i32) (i32.const 9))
+      (export-new A)
+      (export-new B)
+      (export-func value)
+    `)] });
+    const exports = await instantiate(wat);
+
+    assert.strictEqual(exports.value(exports["B.new"]()), 9);
+    assert.throws(() => exports.value(exports["A.new"]()), WebAssembly.RuntimeError);
+    assert.include(wat, "(func $generic.value.fallback");
+  });
+
+  it("requires the complete argument list for call-next-method", async () => {
+    const cases = [
+      "(call-next-method)",
+      "(call-next-method $object)",
+      "(call-next-method $object $value (i32.const 1))",
+    ];
+    for (const invocation of cases) {
+      let error;
+      try {
+        await compileToWat({ sources: [source("next-arity.idle", `
+          (defclass A)
+          (defclass B (A))
+          (defgeneric $value ((object A) (value i32) i32))
+          (defmethod $value ((object A) (value i32) i32) $value)
+          (defmethod $value ((object B) (value i32) i32) ${invocation})
+        `)] });
+      } catch (caught) {
+        error = caught;
+      }
+      assert.strictEqual(error?.code, "CALL_NEXT_METHOD_ARITY", invocation);
+    }
+  });
+
+  it("rejects call-next-method outside a method body", async () => {
+    let error;
+    try {
+      await compileToWat({ sources: [source("outside-next.idle", `
+        (defclass A)
+        (defgeneric $value ((object A) i32))
+        (func $bad (param $object (ref $A)) (result i32)
+          (call-next-method $object))
+      `)] });
+    } catch (caught) {
+      error = caught;
+    }
+    assert.strictEqual(error?.code, "CALL_NEXT_METHOD_OUTSIDE_METHOD");
   });
 
   it("runs additional user WAT macros inside raw method bodies", async () => {
     const wat = await compileToWat({
       macroModules: { helper: new URL("fixtures/macros/identity.wat", import.meta.url) },
       sources: [source("macro.idle", `
-        (class Answer
-          (method read () (result i32)
-            (helper:identity (i32.const 42))))
+        (defclass Answer)
+        (defgeneric $answer-read ((answer Answer) i32))
+        (defmethod $answer-read ((answer Answer) i32)
+          (helper:identity (i32.const 42)))
         (export-new Answer)
-        (export-method Answer read)
+        (export-func answer-read)
       `)],
     });
     const exports = await instantiate(wat);
 
-    assert.strictEqual(exports["Answer.read"](exports["Answer.new"]()), 42);
+    assert.strictEqual(exports["answer-read"](exports["Answer.new"]()), 42);
   });
 
   it("runs the documented object and external macro example", async () => {
@@ -533,14 +635,29 @@ describe("Idle class compiler", () => {
 
   it("reports declaration errors with the originating source name", async () => {
     const cases = [
-      ["(class Child (extends Missing))", "UNKNOWN_PARENT"],
-      ["(class A (extends B)) (class B (extends A))", "INHERITANCE_CYCLE"],
-      ["(class A (field x i32)) (class B (extends A) (field x i32))", "FIELD_SHADOWING"],
-      ["(class A (override absent () (result)))", "UNKNOWN_OVERRIDE"],
-      ["(class A (method f ((x i32) (x i32)) (result)))", "DUPLICATE_PARAMETER"],
-      ["(class A (field x i32) (method f () (result) (classes:set A x (local.get $this) (i32.const 1))))", "IMMUTABLE_FIELD"],
-      ["(class bad.name)", "INVALID_IDENTIFIER"],
-      ["(class A) (class A)", "DUPLICATE_CLASS"],
+      ["(defclass)", "INVALID_DEFCLASS"],
+      ["(defclass A (B C))", "MULTIPLE_SUPERCLASSES"],
+      ["(defclass A (value i32))", "MULTIPLE_SUPERCLASSES"],
+      ["(defclass A B)", "EXPECTED_PROPER_LIST"],
+      ["(defclass A () x)", "EXPECTED_PROPER_LIST"],
+      ["(defclass A () (x))", "INVALID_FIELD"],
+      ["(defclass A () (x i32) (x i32))", "DUPLICATE_FIELD"],
+      ["(defclass Child (Missing))", "UNKNOWN_PARENT"],
+      ["(defclass A (B)) (defclass B (A))", "INHERITANCE_CYCLE"],
+      ["(defclass A () (x i32)) (defclass B (A) (x i32))", "FIELD_SHADOWING"],
+      ["(class A)", "CLASS_SYNTAX_REMOVED"],
+      ["(defclass A) (export-method A old)", "EXPORT_METHOD_SYNTAX_REMOVED"],
+      ["(defclass A) (defgeneric $f ((a A)))", "INVALID_GENERIC_SIGNATURE"],
+      ["(defclass A) (defgeneric $f ((a A) i32)) (defgeneric $f ((a A) i32))", "DUPLICATE_GENERIC"],
+      ["(defclass A) (defgeneric $f ((x A) (x i32) i32))", "DUPLICATE_PARAMETER"],
+      ["(defclass A () (x i32)) (defgeneric $f ((a A) i32)) (defmethod $f ((a A) i32) (classes:set A x $a (i32.const 1)) (i32.const 0))", "IMMUTABLE_FIELD"],
+      ["(defclass A) (defmethod $missing ((a A) i32) (i32.const 0))", "UNKNOWN_GENERIC"],
+      ["(defgeneric $f ((x i32) i32))", "INVALID_DISPATCH_TYPE"],
+      ["(defclass A) (defclass B) (defgeneric $f ((a A) i32)) (defmethod $f ((b B) i32) (i32.const 0))", "UNRELATED_METHOD_SPECIALIZER"],
+      ["(defclass A) (defgeneric $f ((a A) i32)) (defmethod $f ((a A) i32) (i32.const 0)) (defmethod $f ((other A) i32) (i32.const 1))", "DUPLICATE_METHOD"],
+      ["(defclass A) (defgeneric $f ((a A) i32)) (defun $f (i32) (i32.const 0))", "DUPLICATE_FUNCTION"],
+      ["(defclass bad.name)", "INVALID_IDENTIFIER"],
+      ["(defclass A) (defclass A)", "DUPLICATE_CLASS"],
     ];
 
     for (const [text, code] of cases) {

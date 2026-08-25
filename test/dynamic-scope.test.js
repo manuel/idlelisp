@@ -114,13 +114,17 @@ const program = `
             (ref.i31 (local.get $remaining)))
           (i32.sub (local.get $remaining) (i32.const 1))))))
 
-  (class DynamicReader
-    (method has-key-a ((dynamic (ref null $dynamic.binding)))
-      (result i32)
-      (dynamic:has (local.get $dynamic) (global.get $key-a))))
+  (defclass DynamicReader)
+
+  (defgeneric $dynamic-reader-has-key-a
+    ((reader DynamicReader) (dynamic (ref null $dynamic.binding)) i32))
+
+  (defmethod $dynamic-reader-has-key-a
+    ((reader DynamicReader) (dynamic (ref null $dynamic.binding)) i32)
+    (dynamic:has (local.get $dynamic) (global.get $key-a)))
 
   (export-new DynamicReader)
-  (export-method DynamicReader has-key-a)
+  (export-func dynamic-reader-has-key-a)
   (export-func key-a)
   (export-func empty-has)
   (export-func fallback-is-value-a)
@@ -211,8 +215,8 @@ describe("explicit dynamic environments", () => {
   it("threads environments through virtual and proper tail calls", () => {
     const environment = exports["make-environment"]();
     const reader = exports["DynamicReader.new"]();
-    assert.strictEqual(exports["DynamicReader.has-key-a"](reader, null), 0);
-    assert.strictEqual(exports["DynamicReader.has-key-a"](reader, environment), 1);
+    assert.strictEqual(exports["dynamic-reader-has-key-a"](reader, null), 0);
+    assert.strictEqual(exports["dynamic-reader-has-key-a"](reader, environment), 1);
     assert.strictEqual(exports["tail-loop"](null, 100_000), 1);
   });
 

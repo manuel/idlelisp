@@ -8,13 +8,13 @@ does have some interesting ideas and results:
 
 Core features
 
-- A simple single-inheritance object system that allows O(1) method
-  lookups based on Wasm GC type information.
+- A simple single-inheritance object system with O(1) generic-function
+  dispatch based on Wasm GC type information.
 
 - Lisp syntax with macros that are loaded from WebAssembly modules.
   Macros receive and return syntax forms (conses) as normal GC'ed objects.
 
-- Static type checking for the object system and method calls.  Only
+- Static type checking for the object system and generic calls.  Only
   subsections of code need to be typed, user can use full .wat syntax
   elsewhere.
 
@@ -60,17 +60,17 @@ The checked function form has the same compact signature shape as the unchecked
 (typed-defun $count (($list List) i32)
   (let $length i32 0)
   (let $cursor List $list)
-  (while (i32.eqz (.is-empty $cursor))
-    (set $cursor (.tail $cursor))
+  (while (i32.eqz ($is-empty $cursor))
+    (set $cursor ($tail $cursor))
     (set $length (i32.add $length 1)))
   $length)
 ----
 
 Arguments, results, and locals are declared by the programmer. Inside the body,
 the compiler infers the types of literals, local reads, arithmetic, direct
-calls, constructors, and method sends. In `(.tail $cursor)`, for example, the
-declared type of `$cursor` identifies the class that introduced the method and
-therefore the dispatcher and signature to use.
+calls, constructors, and generic-function calls. In `($tail $cursor)`, for
+example, the `defgeneric` declaration supplies the checked signature, while the
+runtime class of `$cursor` selects the method.
 
 The current checked type universe is intentionally small:
 
@@ -79,7 +79,7 @@ The current checked type universe is intentionally small:
 - nominal widening from a subclass to one of its ancestors.
 
 The checked expression language is also closed. It currently includes integer
-literals, direct calls, constructors, inferred method calls, `i32.add`,
+literals, direct calls (including generic functions), constructors, `i32.add`,
 `i32.sub`, `i32.eqz`, top-level typed `let`, assignment with `set`, and `while`.
 Parameters cannot be reassigned, locals cannot be introduced in nested bodies,
 and a `typed-defun` has exactly one result. These constraints make type checking
@@ -91,15 +91,15 @@ language applies, but it is not pretending that arbitrary embedded WAT has been
 verified by a richer source type system. Binaryen and the Wasm validator remain
 the final authority for that code.
 
-=== Classes, fields, and methods
+=== Classes, fields, and generic functions
 
 Idle provides the conventional pieces of a single-inheritance object system:
 
 - fixed instance fields, either immutable or mutable;
 - constructors generated from the complete inherited field layout;
-- methods with named parameters and Wasm result types;
-- exact-signature overrides;
-- superclass calls;
+- generic functions with named parameters and one required Wasm result type;
+- methods specialized on the first, explicitly named class parameter;
+- direct next-method calls with explicit replacement arguments;
 - nominal subclass-to-parent assignment; and
 - virtual dispatch.
 
@@ -107,34 +107,49 @@ Here is a small hierarchy split across the usual declaration and use sites:
 
 [source,lisp]
 ----
-(class Counter
-  (field value (mut i32))
-  (method read ()
-    (result i32)
-    (classes:get Counter value $this))
-  (method write ((value i32))
-    (result)
-    (classes:set Counter value $this $value)))
+(defclass Counter ()
+  (value (mut i32)))
 
-(class OffsetCounter
-  (extends Counter)
-  (field offset i32)
-  (override read ()
-    (result i32)
-    (i32.add
-      (classes:super-call OffsetCounter read $this)
-      (classes:get OffsetCounter offset $this))))
+(defclass OffsetCounter (Counter)
+  (offset i32))
+
+`(defclass Name)` declares a fieldless root. Otherwise the form contains a
+zero-or-one-element superclass list followed directly by `(name type)` fields;
+a field-bearing root uses `()`. Wrapping a field type as `(mut type)` requests
+the standard mutable Wasm struct-field representation.
+
+(defgeneric $read ((object Counter) i32))
+(defgeneric $write ((object Counter) (value i32) i32))
+
+(defmethod $read ((object Counter) i32)
+  (classes:get Counter value $object))
+
+(defmethod $write ((object Counter) (value i32) i32)
+  (classes:set Counter value $object $value)
+  (i32.const 0))
+
+(defmethod $read ((object OffsetCounter) i32)
+  (i32.add
+    (call-next-method $object)
+    (classes:get OffsetCounter offset $object)))
 
 (typed-defun $main (i32)
   (let $counter Counter
     ($OffsetCounter.new 17 5))
-  (.read $counter))
+  ($read $counter))
 ----
 
-The override repeats the complete inherited signature. The compiler rejects an
-override whose arguments or results differ from the method it replaces. This is
-simpler than introducing variance rules and ensures that every inherited method
-slot retains one Wasm function type.
+`defgeneric`, `defmethod`, and `defun` use the same combined signature-list
+style. A generic always has at least the dispatch parameter and exactly one
+result. A method repeats the complete signature: its receiver type may be the
+generic's dispatch class or a subclass, while every other parameter type and
+the result must match exactly. Parameter names may differ.
+
+`call-next-method` always receives the complete replacement argument list. It
+directly calls the nearest ancestor method computed at compile time; if there is
+no ancestor method, it calls the generic's trapping fallback. Generics may be
+declared without a base method, so partially implemented hierarchies are valid,
+but an uncovered runtime class traps when dispatched.
 
 Fields are statically laid out. A subclass preserves all parent fields and
 appends its own. Because Wasm GC types form part of a module's static type graph,
@@ -144,22 +159,22 @@ Idle resolves the class hierarchy while linking the input files into one module.
 
 Each generated instance begins with a reference to an immutable class
 descriptor. A descriptor contains a nullable parent descriptor and one fixed
-function-reference field for every method slot visible on that class. A
+function-reference field for every generic slot visible on that class. A
 subclass descriptor preserves inherited slot offsets, copies inherited method
-references, and replaces references for overridden methods.
+references, and replaces a reference when a method specializes that subclass.
 
 A virtual call such as:
 
 [source,lisp]
 ----
-(.tail $cursor)
+($tail $cursor)
 ----
 
 lowers conceptually to:
 
 [source,wat]
 ----
-(call $List.tail.dispatch
+(call $tail
   (local.get $cursor))
 ----
 
@@ -171,7 +186,7 @@ The dispatcher performs three operations:
 
 There is no runtime search up the parent chain. Inheritance was already resolved
 when the descriptors were built. The static receiver type tells the compiler
-which descriptor layout and method signature to use, while the descriptor value
+which descriptor layout and generic signature to use, while the descriptor value
 selects the runtime implementation.
 
 The Wasm engine can attach a monomorphic or polymorphic inline cache to the
@@ -400,7 +415,7 @@ control only where its guarantees can be expressed honestly on WebAssembly.
 == A complete object-and-macro example
 
 The following small program combines an external macro, single inheritance, a
-superclass call, an override, nominal upcasting, and inferred virtual dispatch.
+next-method call, a specialized method, nominal upcasting, and generic dispatch.
 The macro module defines `(demo:double expression)` by constructing an
 `i32.add` form from ordinary Idle cons cells:
 
@@ -422,33 +437,34 @@ The macro module defines `(demo:double expression)` by constructing an
       ($cons $expression ($cons $expression #nil)))))
 ----
 
-The application uses that macro inside an overriding method. The checked entry
-point only knows that `$meter` is a `Meter`, so `(.reading $meter)` must dispatch
-virtually:
+The application uses that macro inside a specialized method. The checked entry
+point only knows that `$meter` is a `Meter`, so `($reading $meter)` dispatches
+through its runtime class:
 
 [source,lisp]
 ----
 (module
-  (class Meter
-    (field value i32)
-    (method reading ()
-      (result i32)
-      (classes:get Meter value $this)))
+  (defclass Meter ()
+    (value i32))
 
-  (class CalibratedMeter
-    (extends Meter)
-    (field correction i32)
-    (override reading ()
-      (result i32)
-      (demo:double
-        (i32.add
-          (classes:super-call CalibratedMeter reading $this)
-          (classes:get CalibratedMeter correction $this)))))
+  (defclass CalibratedMeter (Meter)
+    (correction i32))
+
+  (defgeneric $reading ((meter Meter) i32))
+
+  (defmethod $reading ((meter Meter) i32)
+    (classes:get Meter value $meter))
+
+  (defmethod $reading ((meter CalibratedMeter) i32)
+    (demo:double
+      (i32.add
+        (call-next-method $meter)
+        (classes:get CalibratedMeter correction $meter))))
 
   (typed-defun $main (i32)
     (let $meter Meter
       ($CalibratedMeter.new 17 5))
-    (.reading $meter))
+    ($reading $meter))
 
   (export-func main))
 ----
@@ -466,14 +482,14 @@ node src/idlec.mjs \
   -o /tmp/idle-meter.wat
 ----
 
-`Meter.reading` returns `17`. The override calls that implementation, adds the
+The `Meter` method returns `17`. The specialized method calls it, adds the
 correction `5`, and the external macro duplicates the pure resulting expression
 into an addition. The exported `main` therefore returns `44`.
 
 This example also exposes a current staging boundary. User macros compose
 naturally with raw WAT-shaped method bodies. A user macro nested directly inside
 `typed-defun` is not expanded before that function's closed expression checker
-runs, so checked functions should call methods or raw helper functions that
+runs, so checked functions should call generic functions or raw helpers that
 contain such extensions. Moving user expansion ahead of checked lowering is a
 natural future improvement.
 
@@ -585,7 +601,7 @@ system, but important work remains:
 
 - broaden the checked language beyond `i32`, non-null class references, and its
   current expression set;
-- type-check method bodies instead of requiring WAT-shaped implementations;
+- type-check `defmethod` bodies instead of requiring WAT-shaped implementations;
 - support richer reader syntax and quoted data;
 - introduce a disciplined approach to macro hygiene;
 - allow user macro modules to depend on one another;

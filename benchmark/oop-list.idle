@@ -1,24 +1,25 @@
 (module
-(class List
-  (method is-empty ()
-    (result i32)
-    (i32.const 1))
-  (method tail ()
-    (result List)
-    $this))
+(defclass List)
 
-(class Nil
-  (extends List))
+(defclass Nil (List))
 
-(class Node
-  (extends List)
-  (field next List)
-  (override is-empty ()
-    (result i32)
-    (i32.const 0))
-  (override tail ()
-    (result List)
-    (classes:get Node next $this)))
+(defclass Node (List)
+  (next List))
+
+(defgeneric $is-empty ((list List) i32))
+(defgeneric $tail ((list List) List))
+
+(defmethod $is-empty ((list List) i32)
+  (i32.const 1))
+
+(defmethod $tail ((list List) List)
+  $list)
+
+(defmethod $is-empty ((list Node) i32)
+  (i32.const 0))
+
+(defmethod $tail ((list Node) List)
+  (classes:get Node next $list))
 
 (typed-defun $build (($size i32) List)
   (let $remaining i32 $size)
@@ -31,8 +32,8 @@
 (typed-defun $count (($list List) i32)
   (let $length i32 0)
   (let $cursor List $list)
-  (while (i32.eqz (.is-empty $cursor))
-    (set $cursor (.tail $cursor))
+  (while (i32.eqz ($is-empty $cursor))
+    (set $cursor ($tail $cursor))
     (set $length (i32.add $length 1)))
   $length)
 

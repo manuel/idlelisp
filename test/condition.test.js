@@ -14,11 +14,10 @@ const program = `(module
       (param (ref eq))
       (result (ref eq))))
 
-  (class child-error
-    (extends simple-error)
-    (field code i32))
-  (class left-error (extends error))
-  (class right-error (extends error))
+  (defclass child-error (simple-error)
+    (code i32))
+  (defclass left-error (error))
+  (defclass right-error (error))
 
   (type $condition-test.token (struct (field i32)))
   (global $condition-test.key (ref $condition-test.token)
@@ -541,7 +540,7 @@ describe("conditions and named restarts", () => {
       },
       {
         code: "NOT_CONDITION_CLASS",
-        extra: "(class ordinary)",
+        extra: "(defclass ordinary)",
         spec: "(ordinary $bad-handler (ref.null eq))",
       },
       {
