@@ -1,0 +1,10 @@
+(module
+(class OffsetCounter
+  (extends Counter)
+  (field offset i32)
+  (override read ()
+    (result i32)
+    (i32.add
+      (classes:super-call OffsetCounter read $this)
+      (classes:get OffsetCounter offset $this))))
+)

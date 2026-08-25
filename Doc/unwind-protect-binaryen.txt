@@ -1,0 +1,28 @@
+Binaryen reference results in control:unwind-protect
+
+control:unwind-protect leaves the protected result on the WebAssembly operand
+stack while its normal-path cleanup forms run. This works directly for numeric
+results. For example, an i32 result can pass through the generated block and try
+without changing its type.
+
+Binaryen's WAT parser handles a reference result differently. When a value such
+as (ref eq) must survive later instructions, Binaryen lowers it through a scratch
+local whose inferred type is anyref. Validation then rejects the scratch local as
+the narrower (ref eq) result, even though the original stack-shaped WAT expresses
+the intended flow.
+
+For one result written with the canonical (ref ...) syntax, the macro avoids this
+problem by giving its internal block and try an anyref result and wrapping the
+block in ref.cast to restore the declared result type. This does not box, copy, or
+allocate the protected value. It only widens the internal static type and checks
+the declared type at the boundary.
+
+Numeric multiple results are supported by enabling Binaryen's Multivalue feature.
+The current workaround does not cover multiple results containing a reference,
+such as (result i32 (ref eq)). Binaryen infers an overly broad reference component
+for the generated scratch tuple and rejects the final tuple type in the same way.
+
+Possible future fixes are to teach the macro to normalize and cast every reference
+component of a multiple result, to require caller-supplied correctly typed locals,
+or to stop depending on Binaryen's current WAT-to-IR scratch-local lowering for
+this construct.

@@ -1,0 +1,14 @@
+(module
+  (import "idle" "cons"
+    (func $cons (param (ref eq)) (param (ref eq)) (result (ref eq))))
+  (import "idle" "car"
+    (func $car (param (ref eq)) (result (ref eq))))
+  (import "idle" "cdr"
+    (func $cdr (param (ref eq)) (result (ref eq))))
+
+  (defun $double (($form (ref eq)) (ref eq))
+    (export "macro:double")
+    (let $expression (ref eq) ($car ($cdr $form)))
+    ($cons
+      'i32.add
+      ($cons $expression ($cons $expression #nil)))))

@@ -1,0 +1,602 @@
+= Idle: A statically-typed, low-level "Lisp" for Wasm GC
+:toc: left
+:toclevels: 3
+:source-highlighter: highlight.js
+
+I created this in one day, and it's a bit of a frankenlanguage, but it
+does have some interesting ideas and results:
+
+Core features
+
+- A simple single-inheritance object system that allows O(1) method
+  lookups based on Wasm GC type information.
+
+- Lisp syntax with macros that are loaded from WebAssembly modules.
+  Macros receive and return syntax forms (conses) as normal GC'ed objects.
+
+- Static type checking for the object system and method calls.  Only
+  subsections of code need to be typed, user can use full .wat syntax
+  elsewhere.
+
+Results
+
+On V8, seems to perform well relative to mature compilers like Guile and JS
+with very little code.  Implementation vibed, but not too shabby.
+
+Since this is WIP, for now a clanker-written article will have to
+suffice.
+
+== Introduction
+
+Idle is an experimental language built directly around WebAssembly GC. Its
+surface is Lisp-shaped, its object system is statically typed and based on
+single inheritance, and its higher-level control facilities borrow from Common
+Lisp: cleanup with `unwind-protect`, typed conditions, handlers, and named
+restarts.
+
+Those features are deliberately not hidden behind a large compiler. Idle keeps
+WebAssembly visible. A programmer can use a checked source subset where it is
+useful, write raw WAT-shaped forms where precise control is needed, and extend
+the language with macros compiled to Wasm. The result is best understood as
+three layers:
+
+1. a statically typed object language;
+2. Lisp syntax with external, language-authored macros; and
+3. structured Lisp control abstractions implemented over Wasm exceptions and
+   explicit environment values.
+
+Idle is still a research implementation, not a general-purpose production
+language. Its restrictions are as important as its implemented features.
+
+== 1. A statically typed object language
+
+=== Typed functions
+
+The checked function form has the same compact signature shape as the unchecked
+`defun` form:
+
+[source,lisp]
+----
+(typed-defun $count (($list List) i32)
+  (let $length i32 0)
+  (let $cursor List $list)
+  (while (i32.eqz (.is-empty $cursor))
+    (set $cursor (.tail $cursor))
+    (set $length (i32.add $length 1)))
+  $length)
+----
+
+Arguments, results, and locals are declared by the programmer. Inside the body,
+the compiler infers the types of literals, local reads, arithmetic, direct
+calls, constructors, and method sends. In `(.tail $cursor)`, for example, the
+declared type of `$cursor` identifies the class that introduced the method and
+therefore the dispatcher and signature to use.
+
+The current checked type universe is intentionally small:
+
+- `i32`;
+- non-null class types such as `List`;
+- nominal widening from a subclass to one of its ancestors.
+
+The checked expression language is also closed. It currently includes integer
+literals, direct calls, constructors, inferred method calls, `i32.add`,
+`i32.sub`, `i32.eqz`, top-level typed `let`, assignment with `set`, and `while`.
+Parameters cannot be reassigned, locals cannot be introduced in nested bodies,
+and a `typed-defun` has exactly one result. These constraints make type checking
+and lowering small enough to audit.
+
+Unchecked `defun` remains the escape hatch for full WAT-shaped bodies and types
+outside the checked subset. Idle is therefore statically typed where its source
+language applies, but it is not pretending that arbitrary embedded WAT has been
+verified by a richer source type system. Binaryen and the Wasm validator remain
+the final authority for that code.
+
+=== Classes, fields, and methods
+
+Idle provides the conventional pieces of a single-inheritance object system:
+
+- fixed instance fields, either immutable or mutable;
+- constructors generated from the complete inherited field layout;
+- methods with named parameters and Wasm result types;
+- exact-signature overrides;
+- superclass calls;
+- nominal subclass-to-parent assignment; and
+- virtual dispatch.
+
+Here is a small hierarchy split across the usual declaration and use sites:
+
+[source,lisp]
+----
+(class Counter
+  (field value (mut i32))
+  (method read ()
+    (result i32)
+    (classes:get Counter value $this))
+  (method write ((value i32))
+    (result)
+    (classes:set Counter value $this $value)))
+
+(class OffsetCounter
+  (extends Counter)
+  (field offset i32)
+  (override read ()
+    (result i32)
+    (i32.add
+      (classes:super-call OffsetCounter read $this)
+      (classes:get OffsetCounter offset $this))))
+
+(typed-defun $main (i32)
+  (let $counter Counter
+    ($OffsetCounter.new 17 5))
+  (.read $counter))
+----
+
+The override repeats the complete inherited signature. The compiler rejects an
+override whose arguments or results differ from the method it replaces. This is
+simpler than introducing variance rules and ensures that every inherited method
+slot retains one Wasm function type.
+
+Fields are statically laid out. A subclass preserves all parent fields and
+appends its own. Because Wasm GC types form part of a module's static type graph,
+Idle resolves the class hierarchy while linking the input files into one module.
+
+=== Object representation and virtual calls
+
+Each generated instance begins with a reference to an immutable class
+descriptor. A descriptor contains a nullable parent descriptor and one fixed
+function-reference field for every method slot visible on that class. A
+subclass descriptor preserves inherited slot offsets, copies inherited method
+references, and replaces references for overridden methods.
+
+A virtual call such as:
+
+[source,lisp]
+----
+(.tail $cursor)
+----
+
+lowers conceptually to:
+
+[source,wat]
+----
+(call $List.tail.dispatch
+  (local.get $cursor))
+----
+
+The dispatcher performs three operations:
+
+1. load the receiver's descriptor;
+2. load the method reference from a fixed descriptor field; and
+3. invoke it with `return_call_ref`.
+
+There is no runtime search up the parent chain. Inheritance was already resolved
+when the descriptors were built. The static receiver type tells the compiler
+which descriptor layout and method signature to use, while the descriptor value
+selects the runtime implementation.
+
+The Wasm engine can attach a monomorphic or polymorphic inline cache to the
+indirect call site. Such a cache can accelerate the `call_ref` target, especially
+when a site repeatedly sees one implementation. The explicit descriptor and
+slot loads are still part of the Wasm program unless the engine separately
+proves that it can eliminate them. Idle relies on the engine's optimizer and PIC;
+it does not maintain a second language-level inline cache.
+
+== 2. Lisp syntax and externally loaded macros
+
+=== A small S-expression reader
+
+Idle sources contain one unnamed `(module ...)` form. The reader recognizes:
+
+- signed 31-bit integers;
+- `#t`, `#f`, and the canonical `#nil` value;
+- UTF-8 strings with minimal escapes;
+- plain and qualified symbols;
+- proper lists; and
+- quote abbreviation, where `'value` becomes `(quote value)`.
+
+Names such as `tools:map` are qualified symbols: `tools` is a module name and
+`map` is its local name. Function identifiers beginning with `$` retain the
+familiar WAT convention. In expression position, `($function arguments...)` is
+a direct call and a bare `$local` is a local read.
+
+This is not a complete Common Lisp reader. Comments, dotted list notation,
+backquote, comma, and several punctuation forms are currently unsupported.
+Quoted compiler literals are limited chiefly to symbols and nil. The small
+reader is a deliberate boundary, not merely undocumented behavior.
+
+=== Macros are Wasm modules
+
+Macros do not execute as JavaScript callbacks or through an interpreter. A macro
+module is written in Idle or WAT, compiled to Wasm, and instantiated by the
+reader. It exports functions whose names begin with `macro:`:
+
+[source,lisp]
+----
+(module
+  (import "idle" "car"
+    (func $car (param (ref eq)) (result (ref eq))))
+  (import "idle" "cdr"
+    (func $cdr (param (ref eq)) (result (ref eq))))
+
+  ;; (helper:identity value) expands to value.
+  (defun $identity (($form (ref eq)) (ref eq))
+    (export "macro:identity")
+    ($car ($cdr $form))))
+----
+
+It can be supplied to the link:src/idlec.mjs[command-line compiler] as an
+external module:
+
+[source,sh]
+----
+node src/idlec.mjs \
+  --macro helper=path/to/helper.idle \
+  program.idle \
+  -o program.wat
+----
+
+Loaded under the name `helper`, the exported function is registered as
+`helper:identity`. The expander receives the complete invocation as an Idle
+datum and returns one replacement datum.
+
+The compiler first reads source without expansion so it can discover qualified
+macro references. It then adds external modules and whichever bundled modules
+are required. The bundled namespaces are `classes`, `list`, `dynamic`,
+`condition`, and `control`; class support is also selected when class
+declarations occur.
+
+For every macro module, the loader:
+
+1. compiles `.idle` input to WAT or reads `.wat` input directly;
+2. parses and validates it with Binaryen;
+3. instantiates it with the Idle datum ABI;
+4. finds function exports named `macro:*`; and
+5. registers each export under its qualified symbol.
+
+The datum ABI exposes nil, cons operations, integers, booleans, strings,
+symbols, equality, and hashing. All general language values cross this boundary
+as `(ref eq)`. This lets macros inspect and construct syntax using the same
+Wasm-GC objects used by the reader.
+
+Expansion repeatedly rewrites the outer form until its head is no longer a
+registered macro, then walks the resulting tree. It mutates child cons slots and
+does not descend into `(quote ...)`. Macro instances persist for the reader's
+lifetime, so Wasm globals can deliberately hold expansion state.
+
+The system is powerful but not hygienic. It works on raw symbols and lists, so a
+macro author must manage generated names and capture explicitly. Idle macro
+modules may use bundled macros, but an Idle macro module cannot currently depend
+on another user-supplied macro module.
+
+== 3. Lisp control abstractions, with explicit boundaries
+
+=== `unwind-protect` over Wasm exceptions
+
+The bundled `control:unwind-protect` macro guarantees cleanup after normal
+completion or a caught Wasm exception:
+
+[source,lisp]
+----
+(func $protected-operation (result i32)
+  (control:unwind-protect
+    (result i32)
+    ($do-work)
+    ($release-resource)))
+----
+
+It expands to a Wasm `try` with `catch_all`. On the normal path, the protected
+result remains available while cleanup runs. On the exceptional path, cleanup
+runs before the original exception is rethrown. If cleanup throws, that new
+exception replaces the protected exception, matching the usual practical
+behavior of cleanup constructs.
+
+Zero results, numeric results, reference results, and numeric multiple results
+are supported. Reference results require an internal `anyref` result and a
+boundary cast because of Binaryen's current scratch-local lowering. Multiple
+results containing reference components are not yet supported by that
+workaround.
+
+The word "guarantees" has an important boundary: raw `return` and Wasm traps do
+not unwind through exception handling. A manual return from the protected form
+skips cleanup, and `unreachable` traps without cleanup. Arbitrary branches that
+escape the generated region are likewise outside the structured abstraction.
+Idle therefore cannot allow unrestricted manual non-local control flow while
+claiming Lisp-style cleanup semantics. Code using this layer must transfer
+control through the supported structured operations.
+
+=== Conditions, handlers, and restarts
+
+Idle's condition system combines the object hierarchy with structured control.
+`condition` is a class, `error` extends it, and programs can define more specific
+condition classes with fields. Handler matching follows nominal ancestry rather
+than structural coincidence.
+
+The bundled condition macros include:
+
+- `condition:handler-bind` and `condition:handler-case`;
+- `condition:restart-bind` and `condition:restart-case`;
+- `condition:signal` and `condition:error`;
+- `condition:invoke-restart`; and
+- `condition:compute-restarts`.
+
+A program can signal a condition without hard-coding its recovery policy. An
+outer handler may inspect the available restart names and select one installed
+at the original operation:
+
+[source,lisp]
+----
+(condition:restart-case
+  $environment
+  ((retry $retry-function $retry-context)
+   (use-value $value-function $fallback))
+  $operation
+  $context)
+----
+
+Handlers and restarts are represented as immutable linked frames. Closures pair
+a `ref.func` code pointer with an explicit nullable context reference. Case-style
+transfers use typed Wasm exception tags to unwind to the selected frame;
+bind-style handlers can run without necessarily leaving the signaling context.
+Unhandled errors cross the Wasm boundary through a dedicated exception tag.
+
+This resembles Lisp's condition protocol, but it is intentionally narrower.
+Functions participating in it use prescribed signatures for the environment,
+context, condition, or restart arguments. Control transfer must go through the
+condition runtime. Arbitrary hand-written branches and returns do not acquire
+condition semantics merely because the surrounding source uses Lisp syntax.
+
+=== Explicit environments, not true dynamic scope
+
+Idle does not currently have implicit dynamically scoped variables. Instead it
+provides a persistent environment data structure:
+
+[source,lisp]
+----
+(dynamic:bind $environment $key $value)
+(dynamic:has  $environment $key)
+(dynamic:ref  $environment $key)
+----
+
+Each binding is an immutable node containing a key, value, and parent pointer.
+Shadowing creates a new prefix without mutating the old environment. Reference
+keys compare by identity, while immediate `i31` keys compare by value.
+
+The critical limitation is visible in every function signature: `$environment`
+must be passed explicitly. The compiler does not maintain an invisible dynamic
+binding stack, and arbitrary functions do not automatically inherit dynamic
+state. Explicit threading does, however, make the environment survive virtual
+calls, proper tail calls, and JSPI suspension without depending on native stack
+inspection.
+
+The condition system stores handler and restart frames in this same explicit
+environment. That makes the mechanism inspectable and portable to Wasm, but it
+should not be described as real dynamic scope. It is an explicitly passed,
+persistent context implementing selected dynamic-scope-like protocols.
+
+== How the three layers fit together
+
+The layers reinforce one another:
+
+- condition kinds are ordinary classes in the nominal object hierarchy;
+- condition, control, dynamic-environment, list, and class syntax are largely
+  introduced by bundled macros;
+- those macros construct typed WAT forms rather than interpreting a second
+  runtime language;
+- generated class descriptors and condition closures use Wasm-GC references;
+  and
+- Wasm exception tags provide the non-local transfer needed by case handlers,
+  restarts, and cleanup.
+
+At the same time, the boundaries remain visible. The checked expression subset
+does not cover every control feature. Macro authors can emit arbitrary WAT, but
+must preserve the structural invariants expected by cleanup and condition
+forms. Explicit environment passing provides predictable state flow at the cost
+of the transparency normally associated with dynamic scope.
+
+This mixture is the central Idle experiment: use a small statically typed object
+core, implement language growth as Wasm-hosted Lisp macros, and add high-level
+control only where its guarantees can be expressed honestly on WebAssembly.
+
+== A complete object-and-macro example
+
+The following small program combines an external macro, single inheritance, a
+superclass call, an override, nominal upcasting, and inferred virtual dispatch.
+The macro module defines `(demo:double expression)` by constructing an
+`i32.add` form from ordinary Idle cons cells:
+
+[source,lisp]
+----
+(module
+  (import "idle" "cons"
+    (func $cons (param (ref eq)) (param (ref eq)) (result (ref eq))))
+  (import "idle" "car"
+    (func $car (param (ref eq)) (result (ref eq))))
+  (import "idle" "cdr"
+    (func $cdr (param (ref eq)) (result (ref eq))))
+
+  (defun $double (($form (ref eq)) (ref eq))
+    (export "macro:double")
+    (let $expression (ref eq) ($car ($cdr $form)))
+    ($cons
+      'i32.add
+      ($cons $expression ($cons $expression #nil)))))
+----
+
+The application uses that macro inside an overriding method. The checked entry
+point only knows that `$meter` is a `Meter`, so `(.reading $meter)` must dispatch
+virtually:
+
+[source,lisp]
+----
+(module
+  (class Meter
+    (field value i32)
+    (method reading ()
+      (result i32)
+      (classes:get Meter value $this)))
+
+  (class CalibratedMeter
+    (extends Meter)
+    (field correction i32)
+    (override reading ()
+      (result i32)
+      (demo:double
+        (i32.add
+          (classes:super-call CalibratedMeter reading $this)
+          (classes:get CalibratedMeter correction $this)))))
+
+  (typed-defun $main (i32)
+    (let $meter Meter
+      ($CalibratedMeter.new 17 5))
+    (.reading $meter))
+
+  (export-func main))
+----
+
+The runnable sources are
+link:example/article/double.idle[example/article/double.idle] and
+link:example/article/meter.idle[example/article/meter.idle]. Compile them from
+the repository root with link:src/idlec.mjs[idlec]:
+
+[source,sh]
+----
+node src/idlec.mjs \
+  --macro demo=example/article/double.idle \
+  example/article/meter.idle \
+  -o /tmp/idle-meter.wat
+----
+
+`Meter.reading` returns `17`. The override calls that implementation, adds the
+correction `5`, and the external macro duplicates the pure resulting expression
+into an addition. The exported `main` therefore returns `44`.
+
+This example also exposes a current staging boundary. User macros compose
+naturally with raw WAT-shaped method bodies. A user macro nested directly inside
+`typed-defun` is not expanded before that function's closed expression checker
+runs, so checked functions should call methods or raw helper functions that
+contain such extensions. Moving user expansion ahead of checked lowering is a
+natural future improvement.
+
+== Toolchain and developer tools
+
+=== Build and command-line compiler
+
+The project uses Node.js and Binaryen. The principal commands are:
+
+[source,sh]
+----
+npm run build
+npm test
+npm run demo:restarts
+npm run benchmark:gabriel
+npm run benchmark:oop
+----
+
+`npm run build` assembles and compiles the
+link:src/objects.wat[core object runtime source] into
+link:build/objects.wasm[build/objects.wasm]. The
+link:src/idlec.mjs[command-line compiler] combines one or more Idle files into
+validated WAT:
+
+[source,sh]
+----
+node src/idlec.mjs [--macro NAME=PATH ...] INPUT.idle ... -o OUTPUT.wat
+----
+
+Input modules are flattened in input order, class inheritance is resolved over
+the combined declarations, required bundled runtimes are injected, macros are
+expanded, and the resulting module is validated. Output is written atomically.
+
+=== Programmatic compiler and reader APIs
+
+The JavaScript API exposes two main layers:
+
+- link:src/class-compiler.mjs[`compileToWat` and `compileFilesToWat`] compile
+  source records or files;
+- link:src/idle.mjs[`createReader`] exposes reading, datum inspection, mutation, and macro
+  expansion directly.
+
+Compiler callers may supply a `Map` or object of macro module names to `.idle`
+or `.wat` URLs. Reader callers can additionally provide a custom macro host
+factory. Structured compiler errors retain codes, source names, byte offsets,
+and macro context where applicable.
+
+=== Binaryen and WebAssembly tools
+
+Binaryen parses generated WAT, enables the required GC, reference, exception,
+tail-call, and multivalue features, validates modules, optionally optimizes them,
+and emits Wasm. The Gabriel harness currently uses Binaryen's highest speed
+optimization level, `-O4`, with shrink optimization disabled.
+
+The generated Wasm runs through the standard `WebAssembly.compile` and
+`WebAssembly.instantiate` APIs. The object runtime is a separate prebuilt Wasm
+module whose exports supply the reader, macro, list, symbol, equality, and
+hashing ABI.
+
+=== Examples and tests
+
+The repository includes:
+
+- a link:example/classes/[multi-file counter and subclass example];
+- a link:example/restarts.idle[condition/restart recovery demonstration];
+- a link:benchmark/oop-list.idle[typed linked-list benchmark];
+- Gabriel benchmark implementations in
+  link:benchmark/gabriel.idle[Idle],
+  link:benchmark/guile-gabriel.scm[compiled Guile], and
+  link:benchmark/js-gabriel.mjs[JavaScript];
+- compiler, reader, macro, object, dynamic-environment, condition, control, and
+  benchmark tests under link:test/[test/].
+
+The full test command rebuilds the runtime before running the Mocha suite. Tests
+validate generated WAT as well as runtime behavior, including deep reader input,
+tail calls, class dispatch, macro failures, cleanup paths, condition transfer,
+and JSPI suspension.
+
+== Performance snapshot
+
+The checked-in link:benchmark/gabriel-results.md[Gabriel benchmark report] compares
+Idle, freshly compiled Guile, and JavaScript. Every engine receives two warmup
+batches and five measured batches, and all three use the same fixed iteration
+count for each workload. Compilation is excluded from per-operation timings.
+Idle is compiled with Binaryen `-O4` before V8 compiles the resulting Wasm.
+
+On the recorded run, using Idle as `1.00`, Guile's median relative score was
+`1.21` and JavaScript's was `1.92`. Idle led compiled Guile on `deriv`, `divrec`,
+and `tak`; Guile led on `diviter`, `takl`, `ntakl`, and `cpstak`. Against
+JavaScript, Idle led `diviter` and `tak`, was effectively even on `deriv`, and
+trailed on the other four workloads.
+
+These figures are a snapshot from one machine, not a universal ranking. The
+workloads stress different combinations of allocation, imported cons
+operations, direct recursion, tail calls, and continuation representation. In
+particular, Binaryen `-O4` did not improve every recursive workload uniformly.
+The value of the harness is its deliberately simple comparison protocol and its
+complete generated table, not a single aggregate score.
+
+The separate link:benchmark/oop.mjs[object-oriented list harness] compares an
+equivalent JavaScript linked list with the Wasm-GC class implementation. Its
+source workload is available in
+link:benchmark/oop-list.idle[benchmark/oop-list.idle].
+
+== Current limits and likely next steps
+
+Idle already demonstrates that these three ideas can coexist in a small Wasm-GC
+system, but important work remains:
+
+- broaden the checked language beyond `i32`, non-null class references, and its
+  current expression set;
+- type-check method bodies instead of requiring WAT-shaped implementations;
+- support richer reader syntax and quoted data;
+- introduce a disciplined approach to macro hygiene;
+- allow user macro modules to depend on one another;
+- investigate separate compilation strategies for class hierarchies;
+- support protected multiple results containing references;
+- define structured control rules that prevent unsafe manual exits; and
+- decide whether implicit dynamic scope belongs in the language or whether
+  explicit environments are the intended permanent model.
+
+The implementation's strongest quality is that it exposes these tradeoffs. Idle
+does not hide its Wasm substrate, and it does not claim semantics that raw Wasm
+control flow cannot yet uphold. That makes it a useful platform for exploring
+how typed objects, Lisp metaprogramming, and Lisp-style recovery can fit into the
+constraints—and opportunities—of WebAssembly GC.

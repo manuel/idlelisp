@@ -1,0 +1,36 @@
+(module
+  (import "idle" "is_nil" (func $is_nil (param (ref eq)) (result i32)))
+  (import "idle" "cons"
+    (func $cons (param (ref eq)) (param (ref eq)) (result (ref eq))))
+  (import "idle" "car" (func $car (param (ref eq)) (result (ref eq))))
+  (import "idle" "cdr" (func $cdr (param (ref eq)) (result (ref eq))))
+  (import "idle" "list_reverse_prepend"
+    (func $list_reverse_prepend
+      (param (ref eq)) (param (ref eq)) (result (ref eq))))
+
+  (defun $reverse_arguments (($form (ref eq)) (ref eq))
+    ($list_reverse_prepend ($cdr $form) #nil))
+
+  (defun $prepend_calls (($reversed (ref eq)) ($result (ref eq)) (ref eq))
+    (block $result_done
+      (loop $prepend
+        (br_if $result_done ($is_nil $reversed))
+        (set $result
+          ($cons
+            '$cons
+            ($cons
+              ($car $reversed)
+              ($cons $result #nil))))
+        (set $reversed ($cdr $reversed))
+        (br $prepend)))
+    $result)
+
+  (defun $expand_list (($form (ref eq)) (ref eq)) (export "macro:list")
+    ($prepend_calls
+      ($reverse_arguments $form)
+      #nil))
+
+  (defun $expand_list_star (($form (ref eq)) (ref eq)) (export "macro:list*")
+    (let $reversed (ref eq) ($reverse_arguments $form))
+    (if ($is_nil $reversed) (then unreachable))
+    ($prepend_calls ($cdr $reversed) ($car $reversed))))

@@ -1,0 +1,41 @@
+(module
+  (import "idle" "cons" (func $cons (param (ref eq)) (param (ref eq)) (result (ref eq))))
+  (import "idle" "car" (func $car (param (ref eq)) (result (ref eq))))
+  (import "idle" "cdr" (func $cdr (param (ref eq)) (result (ref eq))))
+  (import "idle" "integer" (func $integer (param i32) (result (ref eq))))
+  (import "idle" "intern" (func $intern (param (ref eq)) (result (ref eq))))
+  (import "idle" "intern_qualified" (func $intern_qualified (param (ref eq)) (param (ref eq)) (result (ref eq))))
+
+  (global $count (mut i32) (i32.const 0))
+
+  (defun $second (($form (ref eq)) (ref eq)) (export "macro:second")
+    ($car ($cdr ($cdr $form))))
+
+  (defun $wrap (($form (ref eq)) (ref eq)) (export "macro:wrap")
+    (list:list
+      ($intern "wrap")
+      ($car ($cdr $form))))
+
+  (defun $chain (($form (ref eq)) (ref eq)) (export "macro:chain")
+    (list:list*
+      ($intern_qualified
+        ($intern "alpha")
+        "second")
+      ($integer (i32.const 0))
+      ($cdr $form)))
+
+  (defun $to_beta (($form (ref eq)) (ref eq)) (export "macro:to-beta")
+    (drop $form)
+    (list:list
+      ($intern_qualified
+        ($intern "beta")
+        "wrap")))
+
+  (defun $count (($form (ref eq)) (ref eq)) (export "macro:count")
+    (drop $form)
+    (global.set $count (i32.add (global.get $count) (i32.const 1)))
+    ($integer (global.get $count)))
+
+  (defun $fail (($form (ref eq)) (ref eq)) (export "macro:fail")
+    (drop $form)
+    unreachable))

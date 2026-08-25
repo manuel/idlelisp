@@ -1,0 +1,63 @@
+(module
+  (import "idle" "cons"
+    (func $cons (param (ref eq)) (param (ref eq)) (result (ref eq))))
+  (import "idle" "car" (func $car (param (ref eq)) (result (ref eq))))
+  (import "idle" "cdr" (func $cdr (param (ref eq)) (result (ref eq))))
+  (import "idle" "list_length"
+    (func $list_length (param (ref eq)) (result i32)))
+
+  (defun $expand_bind (($form (ref eq)) (ref eq)) (export "macro:bind")
+    (if (i32.ne ($list_length $form) (i32.const 4)) (then unreachable))
+    (let $arguments (ref eq) ($cdr $form))
+    (let $environment (ref eq) ($car $arguments))
+    (set $arguments ($cdr $arguments))
+    (let $key (ref eq) ($car $arguments))
+    (set $arguments ($cdr $arguments))
+    (let $value (ref eq) ($car $arguments))
+    (list:list
+      'call
+      '$dynamic.bind
+      $environment
+      $key
+      $value))
+
+  (defun $expand_ref (($form (ref eq)) (ref eq)) (export "macro:ref")
+    (let $length i32 ($list_length $form))
+    (if
+      (i32.and
+        (i32.ne $length (i32.const 3))
+        (i32.ne $length (i32.const 4)))
+      (then unreachable))
+    (let $arguments (ref eq) ($cdr $form))
+    (let $environment (ref eq) ($car $arguments))
+    (set $arguments ($cdr $arguments))
+    (let $key (ref eq) ($car $arguments))
+    (if (result (ref eq))
+      (i32.eq $length (i32.const 3))
+      (then
+        (list:list
+          'call
+          '$dynamic.ref
+          $environment
+          $key))
+      (else
+        (set $arguments ($cdr $arguments))
+        (list:list
+          'call
+          '$dynamic.ref-or
+          $environment
+          $key
+          ($car $arguments)))))
+
+  (defun $expand_has (($form (ref eq)) (ref eq)) (export "macro:has")
+    (if (i32.ne ($list_length $form) (i32.const 3)) (then unreachable))
+    (let $arguments (ref eq) ($cdr $form))
+    (let $environment (ref eq) ($car $arguments))
+    (set $arguments ($cdr $arguments))
+    (let $key (ref eq) ($car $arguments))
+    (list:list
+      'call
+      '$dynamic.has
+      $environment
+      $key))
+)

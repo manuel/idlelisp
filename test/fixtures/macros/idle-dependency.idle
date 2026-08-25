@@ -1,0 +1,3 @@
+(module
+  (defun $dependent (($form (ref eq)) (ref eq)) (export "macro:dependent")
+    (missing:identity $form)))

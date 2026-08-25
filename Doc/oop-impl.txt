@@ -1,0 +1,353 @@
+Here is the detailed expansion around:
+
+```lisp
+(classes:call List tail $cursor)
+```
+
+The source call expands directly to:
+
+```wat
+(call $List.tail.dispatch
+  (local.get $cursor))
+```
+
+## 1. Relevant object and descriptor types
+
+```wat
+;; Base class descriptor.
+(type $tag
+  (sub
+    (struct
+      (field $classes.parent-tag (ref null $tag)))))
+
+;; Base object header.
+(type $obj
+  (sub
+    (struct
+      (field $tag (ref $tag)))))
+```
+
+`List.tail` has this function signature:
+
+```wat
+(type $List.tail.sig
+  (func
+    (param $self (ref $List))
+    (result (ref $List))))
+```
+
+The `List` descriptor contains fixed method slots:
+
+```wat
+(type $List.tag
+  (sub $tag
+    (struct
+      (field $classes.parent-tag (ref null $tag))
+      (field $is-empty (ref $List.is-empty.sig))
+      (field $tail     (ref $List.tail.sig)))))
+```
+
+Every `List` instance contains its descriptor:
+
+```wat
+(type $List
+  (sub $obj
+    (struct
+      (field $tag (ref $List.tag)))))
+```
+
+`Node` preserves the same inherited descriptor slots:
+
+```wat
+(type $Node.tag
+  (sub $List.tag
+    (struct
+      (field $classes.parent-tag (ref null $tag))
+      (field $is-empty (ref $List.is-empty.sig))
+      (field $tail     (ref $List.tail.sig)))))
+```
+
+A `Node` adds its `next` instance field:
+
+```wat
+(type $Node
+  (sub $List
+    (struct
+      (field $tag  (ref $Node.tag))
+      (field $next (ref $List)))))
+```
+
+`Nil` also has a subtype descriptor and instance type:
+
+```wat
+(type $Nil.tag
+  (sub $List.tag
+    (struct
+      (field $classes.parent-tag (ref null $tag))
+      (field $is-empty      (ref $List.is-empty.sig))
+      (field $tail          (ref $List.tail.sig))
+      (field $sentinel-value (ref $Nil.sentinel-value.sig)))))
+
+(type $Nil
+  (sub $List
+    (struct
+      (field $tag      (ref $Nil.tag))
+      (field $sentinel i32))))
+```
+
+## 2. Base `List.tail` implementation
+
+The source method:
+
+```lisp
+(method tail ()
+  (result (ref $List))
+  $this)
+```
+
+becomes:
+
+```wat
+(func $List.tail.impl
+  (type $List.tail.sig)
+  (param $self (ref $List))
+  (result (ref $List))
+
+  (local $this (ref $List))
+
+  (local.set $this
+    (ref.cast (ref $List)
+      (local.get $self)))
+
+  ;; Return the receiver itself.
+  (local.get $this))
+```
+
+`Nil` does not override `tail`, so its descriptor points to this implementation.
+
+## 3. `Node.tail` override
+
+The source override:
+
+```lisp
+(override tail
+  (classes:get Node next $this))
+```
+
+becomes:
+
+```wat
+(func $Node.tail.impl
+  ;; Overrides retain the signature introduced by List.
+  (type $List.tail.sig)
+  (param $self (ref $List))
+  (result (ref $List))
+
+  (local $this (ref $Node))
+
+  ;; The dispatcher accepts List, so the implementation
+  ;; narrows the receiver to Node.
+  (local.set $this
+    (ref.cast (ref $Node)
+      (local.get $self)))
+
+  ;; Return this.next.
+  (struct.get $Node $next
+    (local.get $this)))
+```
+
+## 4. Class descriptors
+
+Idle1 resolves inheritance while compiling and creates immutable descriptors.
+
+The base `List` descriptor:
+
+```wat
+(global $List.tag.value
+  (ref $List.tag)
+
+  (struct.new $List.tag
+    ;; No parent.
+    (ref.null $tag)
+
+    ;; Fixed method slots.
+    (ref.func $List.is-empty.impl)
+    (ref.func $List.tail.impl)))
+```
+
+The `Nil` descriptor inherits both methods:
+
+```wat
+(global $Nil.tag.value
+  (ref $Nil.tag)
+
+  (struct.new $Nil.tag
+    (global.get $List.tag.value)
+
+    ;; Inherited without modification.
+    (ref.func $List.is-empty.impl)
+    (ref.func $List.tail.impl)
+
+    ;; Method introduced by Nil.
+    (ref.func $Nil.sentinel-value.impl)))
+```
+
+The `Node` descriptor installs its overrides in the same slots:
+
+```wat
+(global $Node.tag.value
+  (ref $Node.tag)
+
+  (struct.new $Node.tag
+    (global.get $List.tag.value)
+
+    ;; Overrides occupy the inherited fixed offsets.
+    (ref.func $Node.is-empty.impl)
+    (ref.func $Node.tail.impl)))
+```
+
+Thus the `$tail` field always occupies the same descriptor offset:
+
+| Receiver class | `$tail` slot |
+| --- | --- |
+| `List` | `$List.tail.impl` |
+| `Nil` | `$List.tail.impl` |
+| `Node` | `$Node.tail.impl` |
+
+No parent traversal happens during a call.
+
+## 5. Constructors
+
+A `Nil` is constructed with its fixed descriptor:
+
+```wat
+(func $Nil.new
+  (param $sentinel i32)
+  (result (ref $Nil))
+
+  (struct.new $Nil
+    (global.get $Nil.tag.value)
+    (local.get $sentinel)))
+```
+
+A `Node` is constructed with the `Node` descriptor and its next pointer:
+
+```wat
+(func $Node.new
+  (param $next (ref $List))
+  (result (ref $Node))
+
+  (struct.new $Node
+    (global.get $Node.tag.value)
+    (local.get $next)))
+```
+
+## 6. The `tail` dispatcher
+
+This is the central expansion:
+
+```wat
+(func $List.tail.dispatch
+  (param $self (ref $List))
+  (result (ref $List))
+
+  (return_call_ref $List.tail.sig
+    ;; Argument passed to the selected method.
+    (local.get $self)
+
+    ;; Function reference used by return_call_ref.
+    (struct.get $List.tag $tail
+      (struct.get $List $tag
+        (local.get $self)))))
+```
+
+Separated into conceptual steps:
+
+```wat
+;; 1. Load self.tag.
+(local.set $descriptor
+  (struct.get $List $tag
+    (local.get $self)))
+
+;; 2. Load descriptor.tail.
+(local.set $implementation
+  (struct.get $List.tag $tail
+    (local.get $descriptor)))
+
+;; 3. Tail-call that implementation with self.
+(return_call_ref $List.tail.sig
+  (local.get $self)
+  (local.get $implementation))
+```
+
+The generated function uses nested expressions instead of actual locals.
+
+## 7. Call from the traversal loop
+
+The original source:
+
+```lisp
+(set $cursor
+  (classes:call List tail $cursor))
+```
+
+becomes:
+
+```wat
+(local.set $cursor
+  (call $List.tail.dispatch
+    (local.get $cursor)))
+```
+
+Within the complete loop:
+
+```wat
+(func $count
+  (param $list (ref $List))
+  (result i32)
+
+  (local $length i32)
+  (local $cursor (ref $List))
+
+  (local.set $length
+    (i32.const 0))
+
+  (local.set $cursor
+    (local.get $list))
+
+  (block $done
+    (loop $again
+      ;; Dynamically dispatch is-empty.
+      (br_if $done
+        (call $List.is-empty.dispatch
+          (local.get $cursor)))
+
+      ;; Dynamically dispatch tail.
+      (local.set $cursor
+        (call $List.tail.dispatch
+          (local.get $cursor)))
+
+      (local.set $length
+        (i32.add
+          (local.get $length)
+          (i32.const 1)))
+
+      (br $again)))
+
+  (local.get $length))
+```
+
+The resulting `tail` path is:
+
+```text
+$count
+  → direct call $List.tail.dispatch
+  → load cursor.tag
+  → load tag.tail at a fixed offset
+  → return_call_ref
+  → $Node.tail.impl
+  → cast cursor to Node
+  → load Node.next
+```
+
+One correction to my earlier description: although the `tail` slot can resolve to either the base or Node implementation, this particular traversal checks `is-empty` first. It never calls `tail` on `Nil`. Therefore, the observed `tail` `call_ref` is normally monomorphic—only `$Node.tail.impl`. The `is-empty` dispatcher is the two-target polymorphic site.

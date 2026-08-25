@@ -1,0 +1,157 @@
+(module
+  (import "idle" "nil" (func $nil (result (ref eq))))
+  (import "idle" "is_nil" (func $is_nil (param (ref eq)) (result i32)))
+  (import "idle" "cons"
+    (func $cons (param (ref eq)) (param (ref eq)) (result (ref eq))))
+  (import "idle" "is_cons" (func $is_cons (param (ref eq)) (result i32)))
+  (import "idle" "car" (func $car (param (ref eq)) (result (ref eq))))
+  (import "idle" "cdr" (func $cdr (param (ref eq)) (result (ref eq))))
+  (import "idle" "list_length"
+    (func $list_length (param (ref eq)) (result i32)))
+  (import "idle" "is_symbol" (func $is_symbol (param (ref eq)) (result i32)))
+  (import "idle" "symbol_has_module"
+    (func $symbol_has_module (param (ref eq)) (result i32)))
+  (import "idle" "condition_matcher"
+    (func $condition_matcher (param (ref eq)) (result (ref eq))))
+  (import "idle" "condition_function"
+    (func $condition_function (param (ref eq)) (result (ref eq))))
+
+  (defun $second (($value (ref eq)) (ref eq))
+    ($car ($cdr $value)))
+
+  (defun $third (($value (ref eq)) (ref eq))
+    ($car ($cdr ($cdr $value))))
+
+  (defun $fourth (($value (ref eq)) (ref eq))
+    ($car ($cdr ($cdr ($cdr $value)))))
+
+  (defun $closure (($type (ref eq)) ($function (ref eq)) ($context (ref eq)) (ref eq))
+    (list:list
+      'struct.new
+      $type
+      (list:list 'ref.func ($condition_function $function))
+      $context))
+
+  (defun $handler_entries (($specs (ref eq)) (ref eq))
+    (let $spec (ref eq) #nil)
+    (let $class (ref eq) #nil)
+    (let $function (ref eq) #nil)
+    (if (result (ref eq))
+      ($is_nil $specs)
+      (then (list:list 'ref.null '$condition.handler.entry))
+      (else
+        (if (i32.eqz ($is_cons $specs)) (then unreachable))
+        (set $spec ($car $specs))
+        (if (i32.ne ($list_length $spec) (i32.const 3)) (then unreachable))
+        (set $class ($car $spec))
+        (set $function ($second $spec))
+        (if (i32.eqz ($is_symbol $function)) (then unreachable))
+        (list:list
+          'struct.new
+          '$condition.handler.entry
+          ($condition_matcher $class)
+          ($closure '$condition.handler.closure $function ($third $spec))
+          ($handler_entries ($cdr $specs))))))
+
+  (defun $restart_entries (($specs (ref eq)) (ref eq))
+    (let $spec (ref eq) #nil)
+    (let $name (ref eq) #nil)
+    (let $function (ref eq) #nil)
+    (if (result (ref eq))
+      ($is_nil $specs)
+      (then (list:list 'ref.null '$condition.restart.entry))
+      (else
+        (if (i32.eqz ($is_cons $specs)) (then unreachable))
+        (set $spec ($car $specs))
+        (if (i32.ne ($list_length $spec) (i32.const 3)) (then unreachable))
+        (set $name ($car $spec))
+        (set $function ($second $spec))
+        (if
+          (i32.or
+            (i32.eqz ($is_symbol $name))
+            ($symbol_has_module $name))
+          (then unreachable))
+        (if (i32.eqz ($is_symbol $function)) (then unreachable))
+        (list:list
+          'struct.new
+          '$condition.restart.entry
+          (list:list 'quote $name)
+          ($closure '$condition.restart.closure $function ($third $spec))
+          ($restart_entries ($cdr $specs))))))
+
+  (defun $expand_handler (($form (ref eq)) ($case i32) (ref eq))
+    (if (i32.ne ($list_length $form) (i32.const 5)) (then unreachable))
+    (let $arguments (ref eq) ($cdr $form))
+    (let $environment (ref eq) ($car $arguments))
+    (let $specs (ref eq) ($second $arguments))
+    (let $body (ref eq) ($third $arguments))
+    (let $context (ref eq) ($fourth $arguments))
+    (if (i32.eqz ($is_symbol $body)) (then unreachable))
+    (list:list
+      'call
+      (if (result (ref eq))
+        $case
+        (then '$condition.handler-case)
+        (else '$condition.handler-bind))
+      $environment
+      ($handler_entries $specs)
+      ($closure '$condition.body.closure $body $context)))
+
+  (defun $expand_restart (($form (ref eq)) ($case i32) (ref eq))
+    (if (i32.ne ($list_length $form) (i32.const 5)) (then unreachable))
+    (let $arguments (ref eq) ($cdr $form))
+    (let $environment (ref eq) ($car $arguments))
+    (let $specs (ref eq) ($second $arguments))
+    (let $body (ref eq) ($third $arguments))
+    (let $context (ref eq) ($fourth $arguments))
+    (if (i32.eqz ($is_symbol $body)) (then unreachable))
+    (list:list
+      'call
+      (if (result (ref eq))
+        $case
+        (then '$condition.restart-case)
+        (else '$condition.restart-bind))
+      $environment
+      ($restart_entries $specs)
+      ($closure '$condition.body.closure $body $context)))
+
+  (defun $expand_handler_bind (($form (ref eq)) (ref eq))
+    (export "macro:handler-bind")
+    ($expand_handler $form (i32.const 0)))
+
+  (defun $expand_handler_case (($form (ref eq)) (ref eq))
+    (export "macro:handler-case")
+    ($expand_handler $form (i32.const 1)))
+
+  (defun $expand_restart_bind (($form (ref eq)) (ref eq))
+    (export "macro:restart-bind")
+    ($expand_restart $form (i32.const 0)))
+
+  (defun $expand_restart_case (($form (ref eq)) (ref eq))
+    (export "macro:restart-case")
+    ($expand_restart $form (i32.const 1)))
+
+  (defun $expand_signal (($form (ref eq)) (ref eq))
+    (export "macro:signal")
+    (if (i32.ne ($list_length $form) (i32.const 3)) (then unreachable))
+    (list:list 'call '$condition.signal ($second $form) ($third $form)))
+
+  (defun $expand_error (($form (ref eq)) (ref eq))
+    (export "macro:error")
+    (if (i32.ne ($list_length $form) (i32.const 3)) (then unreachable))
+    (list:list 'call '$condition.error ($second $form) ($third $form)))
+
+  (defun $expand_invoke_restart (($form (ref eq)) (ref eq))
+    (export "macro:invoke-restart")
+    (if (i32.ne ($list_length $form) (i32.const 4)) (then unreachable))
+    (list:list
+      'call
+      '$condition.invoke-restart
+      ($second $form)
+      ($third $form)
+      ($fourth $form)))
+
+  (defun $expand_compute_restarts (($form (ref eq)) (ref eq))
+    (export "macro:compute-restarts")
+    (if (i32.ne ($list_length $form) (i32.const 2)) (then unreachable))
+    (list:list 'call '$condition.compute-restarts ($second $form))))

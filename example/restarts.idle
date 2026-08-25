@@ -1,0 +1,59 @@
+(module
+  (import "demo" "choose_restart"
+    (func $demo.choose-restart
+      (param (ref eq))
+      (result (ref eq))))
+
+  (defun $demo.fail
+    (($environment (ref null $dynamic.binding))
+     ($context (ref null eq))
+     (ref eq))
+    (condition:error
+      $environment
+      ($simple-error.new
+        "The dragon-powered toaster has eaten breakfast instead of making it")))
+
+  (defun $demo.return-context
+    (($environment (ref null $dynamic.binding))
+     ($context (ref null eq))
+     ($arguments (ref eq))
+     (ref eq))
+    (ref.as_non_null $context))
+
+  (defun $demo.with-restarts
+    (($environment (ref null $dynamic.binding))
+     ($context (ref null eq))
+     (ref eq))
+    (condition:restart-case
+      $environment
+      ((retry
+         $demo.return-context
+         "The toaster apologizes and produces perfect golden toast")
+       (order-pizza
+         $demo.return-context
+         "A heroic pizza courier saves breakfast")
+       (befriend-toaster
+         $demo.return-context
+         "You befriend the toaster; breakfast remains theoretical"))
+      $demo.fail
+      (ref.null eq)))
+
+  (defun $demo.choose-recovery
+    (($environment (ref null $dynamic.binding))
+     ($context (ref null eq))
+     ($problem (ref eq))
+     (ref eq))
+    (let $available (ref eq)
+      (condition:compute-restarts $environment))
+    (let $selected (ref eq)
+      ($demo.choose-restart $available))
+    (condition:invoke-restart $environment $selected #nil))
+
+  (defun $main ((ref eq))
+    (condition:handler-bind
+      (ref.null $dynamic.binding)
+      ((simple-error $demo.choose-recovery (ref.null eq)))
+      $demo.with-restarts
+      (ref.null eq)))
+
+  (export-func main))

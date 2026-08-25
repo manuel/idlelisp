@@ -1,0 +1,88 @@
+(module
+  (import "idle" "cons"
+    (func $cons (param (ref eq)) (param (ref eq)) (result (ref eq))))
+  (import "idle" "is_cons" (func $is_cons (param (ref eq)) (result i32)))
+  (import "idle" "car" (func $car (param (ref eq)) (result (ref eq))))
+  (import "idle" "cdr" (func $cdr (param (ref eq)) (result (ref eq))))
+  (import "idle" "integer" (func $integer (param i32) (result (ref eq))))
+  (import "idle" "list_length"
+    (func $list_length (param (ref eq)) (result i32)))
+  (import "idle" "list_reverse_prepend"
+    (func $list_reverse_prepend
+      (param (ref eq)) (param (ref eq)) (result (ref eq))))
+
+  (defun $copy_append (($value (ref eq)) ($tail (ref eq)) (ref eq))
+    ($list_reverse_prepend
+      ($list_reverse_prepend $value #nil)
+      $tail))
+
+  (defun $expand_unwind_protect (($form (ref eq)) (ref eq)) (export "macro:unwind-protect")
+    (let $reference_result i32 (i32.const 0))
+    (if (i32.lt_u ($list_length $form) (i32.const 3))
+      (then unreachable))
+    (let $arguments (ref eq) ($cdr $form))
+    (let $result_clause (ref eq) ($car $arguments))
+    (if (i32.eqz ($is_cons $result_clause)) (then unreachable))
+    (drop ($list_length $result_clause))
+    (if
+      (i32.eqz
+        (ref.eq
+          ($car $result_clause)
+          'result))
+      (then unreachable))
+    (let $internal_result_clause (ref eq) $result_clause)
+    (let $result_type (ref eq) 'result)
+    (if (i32.eq ($list_length $result_clause) (i32.const 2))
+      (then
+        (set $result_type
+          ($car ($cdr $result_clause)))
+        (if ($is_cons $result_type)
+          (then
+            (if
+              (ref.eq
+                ($car $result_type)
+                'ref)
+              (then
+                (set $reference_result (i32.const 1))
+                (set $internal_result_clause
+                  (list:list
+                    'result
+                    'anyref))))))))
+    (set $arguments ($cdr $arguments))
+    (let $protected (ref eq) ($car $arguments))
+    (let $cleanup (ref eq) ($cdr $arguments))
+    (let $rethrow (ref eq)
+      (list:list
+        'rethrow
+        ($integer (i32.const 0))))
+    (let $catch_all (ref eq)
+      (list:list*
+        'catch_all
+        ($copy_append
+          $cleanup
+          (list:list $rethrow))))
+    (let $do (ref eq)
+      (list:list
+        'do
+        $protected))
+    (let $try (ref eq)
+      (list:list
+        'try
+        $internal_result_clause
+        $do
+        $catch_all))
+    (let $block (ref eq)
+      (list:list*
+        'block
+        $internal_result_clause
+        $try
+        ($copy_append $cleanup #nil)))
+    (if (result (ref eq))
+      $reference_result
+      (then
+        (list:list
+          'ref.cast
+          $result_type
+          $block))
+      (else $block)))
+)

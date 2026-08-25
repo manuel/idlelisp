@@ -1,0 +1,13 @@
+(module
+  (import "idle" "car" (func $car (param (ref eq)) (result (ref eq))))
+  (import "idle" "cdr" (func $cdr (param (ref eq)) (result (ref eq))))
+  (import "idle" "intern" (func $intern (param (ref eq)) (result (ref eq))))
+
+  (defun $identity (($form (ref eq)) (ref eq)) (export "macro:identity")
+    (control:unwind-protect
+      (result (ref eq))
+      ($car ($cdr $form))
+      (nop)))
+
+  (defun $literal-name (($form (ref eq)) (ref eq)) (export "macro:literal-name")
+    ($intern "literal-name")))

@@ -1,0 +1,46 @@
+Idle reader syntax
+
+A source is zero or more forms separated by ASCII whitespace.
+
+Forms are signed 31-bit integers, case-sensitive UTF-8 symbols, UTF-8 strings,
+#t, #f, #nil, proper lists written (form ...), and quote abbreviations written
+'form.  'form is read as (quote form).  () and #nil are the same value. Strings
+use double quotes and support only \" and \\ escapes.
+
+A plain symbol such as foo belongs to the default module.  A qualified symbol
+such as tools:map has the plain symbol tools as its module and map as its local
+name.  Both components must be nonempty and qualification has exactly one :.
+
+In compiled .idle code, a list headed by $name is a direct call to that function.
+A bare $name in an expression operand is a local read; WAT identifier operands
+remain identifiers according to the compiler's per-form operand policy.
+Quoted plain symbols are expression literals: 'foo produces the canonical
+interned symbol foo, cached once per module.  Other quoted values are not yet
+supported by the compiler.
+In expression position, #nil, (), '#nil, and '() produce the canonical nil value.
+
+(user-start $function) declares the optional module start function.  The
+compiler runs its own initialization first when generated values require it.
+
+(let $name type initializer) is a direct function-body form.  It declares a
+function local and initializes it at that source position; it cannot be nested.
+(set $name value) assigns an existing function local.
+
+`typed-defun` has the same combined signature list as `defun`:
+
+  (typed-defun $name (($argument Type) ... ResultType) body ...)
+
+It requires exactly one result plus explicit parameter and local types.  Its
+closed expression subset and inferred `(.method receiver ...)` calls are
+documented in classes.txt.  A symbol beginning with `.` is only special in a
+checked `typed-defun` call position; ordinary WAT and `defun` behavior is
+unchanged.
+
+An integer is [+-]?[0-9]+ and must be between -1073741824 and
+1073741823.  Other tokens are symbols, except tokens beginning with #.
+
+Comments, dotted lists, backquote, comma, and the punctuation characters ` , ;
+are not supported.
+
+Reading succeeds with a proper list containing all top-level forms; an
+empty source therefore returns the empty list.

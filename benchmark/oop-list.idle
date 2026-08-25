@@ -1,0 +1,45 @@
+(module
+(class List
+  (method is-empty ()
+    (result i32)
+    (i32.const 1))
+  (method tail ()
+    (result List)
+    $this))
+
+(class Nil
+  (extends List))
+
+(class Node
+  (extends List)
+  (field next List)
+  (override is-empty ()
+    (result i32)
+    (i32.const 0))
+  (override tail ()
+    (result List)
+    (classes:get Node next $this)))
+
+(typed-defun $build (($size i32) List)
+  (let $remaining i32 $size)
+  (let $list List ($Nil.new))
+  (while $remaining
+    (set $list ($Node.new $list))
+    (set $remaining (i32.sub $remaining 1)))
+  $list)
+
+(typed-defun $count (($list List) i32)
+  (let $length i32 0)
+  (let $cursor List $list)
+  (while (i32.eqz (.is-empty $cursor))
+    (set $cursor (.tail $cursor))
+    (set $length (i32.add $length 1)))
+  $length)
+
+(typed-defun $build-and-count (($size i32) i32)
+  ($count ($build $size)))
+
+(export-func build)
+(export-func count)
+(export-func build-and-count)
+)

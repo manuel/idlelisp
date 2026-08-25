@@ -1,0 +1,24 @@
+{
+  "name": "wasm-gc-objects",
+  "version": "0.1.0",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "idlec": "src/idlec.mjs"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "benchmark:gabriel": "node benchmark/gabriel.mjs",
+    "benchmark:oop": "node benchmark/oop.mjs",
+    "demo:restarts": "npm run build && node example/restarts.mjs",
+    "test": "npm run build && mocha"
+  },
+  "dependencies": {
+    "binaryen": "131.0.0"
+  },
+  "devDependencies": {
+    "chai": "6.2.2",
+    "mocha": "11.8.0"
+  }
+}

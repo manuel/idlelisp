@@ -1,0 +1,357 @@
+(module
+  (import "idle" "is_nil" (func $is-nil (param (ref eq)) (result i32)))
+  (import "idle" "is_cons" (func $is-cons (param (ref eq)) (result i32)))
+  (import "idle" "cons"
+    (func $cons (param (ref eq)) (param (ref eq)) (result (ref eq))))
+  (import "idle" "car" (func $car (param (ref eq)) (result (ref eq))))
+  (import "idle" "cdr" (func $cdr (param (ref eq)) (result (ref eq))))
+  (import "idle" "list_length"
+    (func $list-length (param (ref eq)) (result i32)))
+
+  (global $dividend (mut (ref eq)) (ref.i31 (i32.const 0)))
+  (global $l18 (mut (ref eq)) (ref.i31 (i32.const 0)))
+  (global $l12 (mut (ref eq)) (ref.i31 (i32.const 0)))
+  (global $l6 (mut (ref eq)) (ref.i31 (i32.const 0)))
+  (global $list-sink (mut (ref eq)) (ref.i31 (i32.const 0)))
+  (global $integer-sink (mut i32) (i32.const 0))
+  (global $deriv-input (mut (ref eq)) (ref.i31 (i32.const 0)))
+  (global $deriv-output (mut (ref eq)) (ref.i31 (i32.const 0)))
+
+  (defun $tree-equal (($first (ref eq)) ($second (ref eq)) i32)
+    (if (result i32)
+      ($is-cons $first)
+      (then
+        (if (result i32)
+          ($is-cons $second)
+          (then
+            (i32.and
+              ($tree-equal ($car $first) ($car $second))
+              ($tree-equal ($cdr $first) ($cdr $second))))
+          (else (i32.const 0))))
+      (elif ($is-cons $second)
+        (i32.const 0))
+      (else (ref.eq $first $second))))
+
+  (defun $map-deriv (($values (ref eq)) (ref eq))
+    (if (result (ref eq))
+      ($is-nil $values)
+      (then #nil)
+      (else ($cons ($deriv ($car $values)) ($map-deriv ($cdr $values))))))
+
+  (defun $map-factor (($values (ref eq)) (ref eq))
+    (if (result (ref eq))
+      ($is-nil $values)
+      (then #nil)
+      (else
+        ($cons
+          (list:list '/ ($deriv ($car $values)) ($car $values))
+          ($map-factor ($cdr $values))))))
+
+  (defun $deriv-division (($form (ref eq)) (ref eq))
+    (let $numerator (ref eq) ($car ($cdr $form)))
+    (let $denominator (ref eq) ($car ($cdr ($cdr $form))))
+    (list:list
+      '-
+      (list:list '/ ($deriv $numerator) $denominator)
+      (list:list
+        '/
+        $numerator
+        (list:list
+          '*
+          $denominator
+          $denominator
+          ($deriv $denominator)))))
+
+  (defun $deriv-list (($form (ref eq)) (ref eq))
+    (let $operator (ref eq) ($car $form))
+    (if (ref.eq $operator '+)
+      (then (return ($cons '+ ($map-deriv ($cdr $form)))))
+      (elif (ref.eq $operator '-)
+        (return ($cons '- ($map-deriv ($cdr $form)))))
+      (elif (ref.eq $operator '*)
+        (return
+          (list:list
+            '*
+            $form
+            ($cons '+ ($map-factor ($cdr $form))))))
+      (elif (ref.eq $operator '/)
+        (return ($deriv-division $form))))
+    unreachable)
+
+  (defun $deriv (($form (ref eq)) (ref eq))
+    (if ($is-cons $form) (then (return ($deriv-list $form))))
+    (if (result (ref eq))
+      (ref.eq $form 'x)
+      (then (ref.i31 (i32.const 1)))
+      (else (ref.i31 (i32.const 0)))))
+
+  (defun $benchmark-deriv ((ref eq))
+    ($deriv (global.get $deriv-input)))
+
+  (defun $valid-deriv (i32)
+    ($tree-equal ($benchmark-deriv) (global.get $deriv-output)))
+
+  (defun $create-n (($count i32) (ref eq))
+    (let $result (ref eq) #nil)
+    (block $done
+      (loop $again
+        (br_if $done (i32.eqz $count))
+        (set $result ($cons #nil $result))
+        (set $count (i32.sub $count (i32.const 1)))
+        (br $again)))
+    $result)
+
+  (defun $initialize ()
+    (global.set $deriv-input
+      (list:list
+        '+
+        (list:list '* (ref.i31 (i32.const 3)) 'x 'x)
+        (list:list '* 'a 'x 'x)
+        (list:list '* 'b 'x)
+        (ref.i31 (i32.const 5))))
+    (global.set $deriv-output
+      (list:list
+        '+
+        (list:list
+          '*
+          (list:list '* (ref.i31 (i32.const 3)) 'x 'x)
+          (list:list
+            '+
+            (list:list '/ (ref.i31 (i32.const 0)) (ref.i31 (i32.const 3)))
+            (list:list '/ (ref.i31 (i32.const 1)) 'x)
+            (list:list '/ (ref.i31 (i32.const 1)) 'x)))
+        (list:list
+          '*
+          (list:list '* 'a 'x 'x)
+          (list:list
+            '+
+            (list:list '/ (ref.i31 (i32.const 0)) 'a)
+            (list:list '/ (ref.i31 (i32.const 1)) 'x)
+            (list:list '/ (ref.i31 (i32.const 1)) 'x)))
+        (list:list
+          '*
+          (list:list '* 'b 'x)
+          (list:list
+            '+
+            (list:list '/ (ref.i31 (i32.const 0)) 'b)
+            (list:list '/ (ref.i31 (i32.const 1)) 'x)))
+        (ref.i31 (i32.const 0))))
+    (global.set $dividend ($create-n (i32.const 1000)))
+    (global.set $l18 ($create-n (i32.const 18)))
+    (global.set $l12 ($create-n (i32.const 12)))
+    (global.set $l6 ($create-n (i32.const 6)))
+    (global.set $list-sink #nil))
+  (user-start $initialize)
+
+  (defun $diviter-loop (($values (ref eq)) ($result (ref eq)) (ref eq))
+    (block $done
+      (loop $again
+        (br_if $done ($is-nil $values))
+        (set $result ($cons ($car $values) $result))
+        (set $values ($cdr ($cdr $values)))
+        (br $again)))
+    $result)
+
+  (defun $benchmark-diviter ((ref eq))
+    ($diviter-loop (global.get $dividend) #nil))
+
+  (defun $divrec (($values (ref eq)) (ref eq))
+    (if (result (ref eq))
+      ($is-nil $values)
+      (then #nil)
+      (else ($cons ($car $values) ($divrec ($cdr ($cdr $values)))))))
+
+  (defun $benchmark-divrec ((ref eq))
+    ($divrec (global.get $dividend)))
+
+  (defun $tak (($x i32) ($y i32) ($z i32) i32)
+    (if (result i32)
+      (i32.lt_s $y $x)
+      (then
+        ($tak
+          ($tak (i32.sub $x (i32.const 1)) $y $z)
+          ($tak (i32.sub $y (i32.const 1)) $z $x)
+          ($tak (i32.sub $z (i32.const 1)) $x $y)))
+      (else $z)))
+
+  (defun $benchmark-tak (i32)
+    ($tak (i32.const 18) (i32.const 12) (i32.const 6)))
+
+  (defun $shorterp (($x (ref eq)) ($y (ref eq)) i32)
+    (if ($is-nil $y) (then (return (i32.const 0))))
+    (if ($is-nil $x) (then (return (i32.const 1))))
+    (return_call $shorterp ($cdr $x) ($cdr $y)))
+
+  (defun $mas (($x (ref eq)) ($y (ref eq)) ($z (ref eq)) (ref eq))
+    (if (result (ref eq))
+      ($shorterp $y $x)
+      (then
+        ($mas
+          ($mas ($cdr $x) $y $z)
+          ($mas ($cdr $y) $z $x)
+          ($mas ($cdr $z) $x $y)))
+      (else $z)))
+
+  (defun $benchmark-takl ((ref eq))
+    ($mas (global.get $l18) (global.get $l12) (global.get $l6)))
+
+  (defun $shorterp-readable (($x (ref eq)) ($y (ref eq)) i32)
+    (if ($is-nil $y) (then (return (i32.const 0))))
+    (if ($is-nil $x) (then (return (i32.const 1))))
+    (return_call $shorterp-readable ($cdr $x) ($cdr $y)))
+
+  (defun $mas-readable (($x (ref eq)) ($y (ref eq)) ($z (ref eq)) (ref eq))
+    (if (result (ref eq))
+      ($shorterp-readable $y $x)
+      (then
+        ($mas-readable
+          ($mas-readable ($cdr $x) $y $z)
+          ($mas-readable ($cdr $y) $z $x)
+          ($mas-readable ($cdr $z) $x $y)))
+      (else $z)))
+
+  (defun $benchmark-ntakl ((ref eq))
+    ($mas-readable (global.get $l18) (global.get $l12) (global.get $l6)))
+
+  (defun $list-2 (($value (ref eq)) (ref eq))
+    ($car ($cdr $value)))
+
+  (defun $list-3 (($value (ref eq)) (ref eq))
+    ($car ($cdr ($cdr $value))))
+
+  (defun $list-4 (($value (ref eq)) (ref eq))
+    ($car ($cdr ($cdr ($cdr $value)))))
+
+  (defun $list-5 (($value (ref eq)) (ref eq))
+    ($car ($cdr ($cdr ($cdr ($cdr $value))))))
+
+  (defun $list-6 (($value (ref eq)) (ref eq))
+    ($car ($cdr ($cdr ($cdr ($cdr ($cdr $value)))))))
+
+  (defun $integer-value (($value (ref eq)) i32)
+    (i31.get_s (ref.cast (ref i31) $value)))
+
+  (defun $apply-continuation (($continuation (ref eq)) ($value i32) i32)
+    (if ($is-nil $continuation) (then (return $value)))
+    (let $kind i32 ($integer-value ($car $continuation)))
+    (if (i32.eq $kind (i32.const 1))
+      (then
+        (return_call $cpstak-aux
+          (i32.sub ($integer-value ($list-2 $continuation)) (i32.const 1))
+          ($integer-value ($list-3 $continuation))
+          ($integer-value ($list-4 $continuation))
+          (list:list
+            (ref.i31 (i32.const 2))
+            ($list-3 $continuation)
+            ($list-4 $continuation)
+            ($list-2 $continuation)
+            (ref.i31 $value)
+            ($list-5 $continuation))))
+      (elif (i32.eq $kind (i32.const 2))
+        (return_call $cpstak-aux
+          (i32.sub ($integer-value ($list-2 $continuation)) (i32.const 1))
+          ($integer-value ($list-3 $continuation))
+          ($integer-value ($list-4 $continuation))
+          (list:list
+            (ref.i31 (i32.const 3))
+            ($list-5 $continuation)
+            (ref.i31 $value)
+            ($list-6 $continuation))))
+      (elif (i32.eq $kind (i32.const 3))
+        (return_call $cpstak-aux
+          ($integer-value ($list-2 $continuation))
+          ($integer-value ($list-3 $continuation))
+          $value
+          ($list-4 $continuation))))
+    unreachable)
+
+  (defun $cpstak-aux (($x i32) ($y i32) ($z i32) ($continuation (ref eq)) i32)
+    (if (i32.lt_s $y $x)
+      (then
+        (return_call $cpstak-aux
+          (i32.sub $x (i32.const 1))
+          $y
+          $z
+          (list:list
+            (ref.i31 (i32.const 1))
+            (ref.i31 $y)
+            (ref.i31 $z)
+            (ref.i31 $x)
+            $continuation))))
+    (return_call $apply-continuation $continuation $z))
+
+  (defun $benchmark-cpstak (i32)
+    ($cpstak-aux (i32.const 12) (i32.const 6) (i32.const 3) #nil))
+
+  (defun $repeat-diviter (($operations i32))
+    (block $done
+      (loop $again
+        (br_if $done (i32.eqz $operations))
+        (global.set $list-sink ($benchmark-diviter))
+        (set $operations (i32.sub $operations (i32.const 1)))
+        (br $again))))
+
+  (defun $repeat-deriv (($operations i32))
+    (block $done
+      (loop $again
+        (br_if $done (i32.eqz $operations))
+        (global.set $list-sink ($benchmark-deriv))
+        (set $operations (i32.sub $operations (i32.const 1)))
+        (br $again))))
+
+  (defun $repeat-divrec (($operations i32))
+    (block $done
+      (loop $again
+        (br_if $done (i32.eqz $operations))
+        (global.set $list-sink ($benchmark-divrec))
+        (set $operations (i32.sub $operations (i32.const 1)))
+        (br $again))))
+
+  (defun $repeat-tak (($operations i32))
+    (block $done
+      (loop $again
+        (br_if $done (i32.eqz $operations))
+        (global.set $integer-sink ($benchmark-tak))
+        (set $operations (i32.sub $operations (i32.const 1)))
+        (br $again))))
+
+  (defun $repeat-takl (($operations i32))
+    (block $done
+      (loop $again
+        (br_if $done (i32.eqz $operations))
+        (global.set $list-sink ($benchmark-takl))
+        (set $operations (i32.sub $operations (i32.const 1)))
+        (br $again))))
+
+  (defun $repeat-ntakl (($operations i32))
+    (block $done
+      (loop $again
+        (br_if $done (i32.eqz $operations))
+        (global.set $list-sink ($benchmark-ntakl))
+        (set $operations (i32.sub $operations (i32.const 1)))
+        (br $again))))
+
+  (defun $repeat-cpstak (($operations i32))
+    (block $done
+      (loop $again
+        (br_if $done (i32.eqz $operations))
+        (global.set $integer-sink ($benchmark-cpstak))
+        (set $operations (i32.sub $operations (i32.const 1)))
+        (br $again))))
+
+  (export "benchmark_deriv" (func $benchmark-deriv))
+  (export "benchmark_diviter" (func $benchmark-diviter))
+  (export "benchmark_divrec" (func $benchmark-divrec))
+  (export "benchmark_tak" (func $benchmark-tak))
+  (export "benchmark_takl" (func $benchmark-takl))
+  (export "benchmark_ntakl" (func $benchmark-ntakl))
+  (export "benchmark_cpstak" (func $benchmark-cpstak))
+  (export "valid_deriv" (func $valid-deriv))
+  (export "repeat_deriv" (func $repeat-deriv))
+  (export "repeat_diviter" (func $repeat-diviter))
+  (export "repeat_divrec" (func $repeat-divrec))
+  (export "repeat_tak" (func $repeat-tak))
+  (export "repeat_takl" (func $repeat-takl))
+  (export "repeat_ntakl" (func $repeat-ntakl))
+  (export "repeat_cpstak" (func $repeat-cpstak))
+  (export "list_length" (func $list-length)))

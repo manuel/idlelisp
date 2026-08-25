@@ -1,0 +1,40 @@
+Idle WAT macros
+
+Pass macroModules to createReader as a record from a source module name to a
+.wat or .idle path or URL.  Each exported function named macro:NAME is
+registered as MODULE:NAME.  It receives the complete invocation and returns
+one Idle value.  An .idle macro module contains one unnamed (module ...) and
+may use bundled macros, but cannot yet depend on another user macro module.
+
+Example:
+
+  (module
+    (import "idle" "car"
+      (func $car (param (ref eq)) (result (ref eq))))
+    (import "idle" "cdr"
+      (func $cdr (param (ref eq)) (result (ref eq))))
+
+    ;; (pick:first value) expands to value.
+    (func (export "macro:first")
+      (param $form (ref eq))
+      (result (ref eq))
+      (call $car (call $cdr (local.get $form)))))
+
+The idle import namespace provides:
+
+  nil, is_nil, cons, is_cons, car, cdr, set_car, set_cdr
+  list_length, list_reverse_prepend
+  integer, is_integer, integer_value
+  boolean, is_boolean, boolean_value
+  string, is_string, string_length, string_byte, string_set_byte
+  intern, intern_qualified
+  is_symbol, symbol_has_module, symbol_module, symbol_name
+  equal, is_hashable, hash
+
+All reference parameters and results in this ABI use (ref eq).  Predicates and
+byte/integer operations use i32.  intern accepts a string and creates a plain
+symbol.  intern_qualified accepts a plain module symbol and a local-name
+string.  list_length accepts a proper list.  list_reverse_prepend copies a
+proper list in reverse order before an arbitrary tail.  Invalid types and
+improper source lists trap.  Expansion is synchronous, repeated to a fixed
+point, mutates child cons cells, and does not enter (quote ...).

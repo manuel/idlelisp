@@ -1,0 +1,57 @@
+(module
+  (rec
+    (type $dynamic.binding
+      (struct
+        (field $key (ref eq))
+        (field $value (ref eq))
+        (field $next (ref null $dynamic.binding)))))
+
+  (tag $dynamic.unbound (param (ref eq)))
+
+  (defun $dynamic.bind (($environment (ref null $dynamic.binding)) ($key (ref eq)) ($value (ref eq)) (ref $dynamic.binding))
+    (struct.new $dynamic.binding
+      $key
+      $value
+      $environment))
+
+  (defun $dynamic.find (($environment (ref null $dynamic.binding)) ($key (ref eq)) (ref null $dynamic.binding))
+    (let $cursor (ref null $dynamic.binding) $environment)
+    (block $missing
+      (loop $search
+        (br_if $missing (ref.is_null $cursor))
+        (if
+          (ref.eq
+            (struct.get $dynamic.binding $key
+              (ref.as_non_null $cursor))
+            $key)
+          (then (return $cursor)))
+        (set $cursor
+          (struct.get $dynamic.binding $next
+            (ref.as_non_null $cursor)))
+        (br $search)))
+    (ref.null $dynamic.binding))
+
+  (defun $dynamic.has (($environment (ref null $dynamic.binding)) ($key (ref eq)) i32)
+    (i32.eqz
+      (ref.is_null
+        ($dynamic.find $environment $key))))
+
+  (defun $dynamic.ref (($environment (ref null $dynamic.binding)) ($key (ref eq)) (ref eq))
+    (let $binding (ref null $dynamic.binding)
+      ($dynamic.find $environment $key))
+    (if (ref.is_null $binding)
+      (then (throw $dynamic.unbound $key)))
+    (struct.get $dynamic.binding $value
+      (ref.as_non_null $binding)))
+
+  (defun $dynamic.ref-or (($environment (ref null $dynamic.binding)) ($key (ref eq)) ($fallback (ref eq)) (ref eq))
+    (let $binding (ref null $dynamic.binding)
+      ($dynamic.find $environment $key))
+    (if (result (ref eq))
+      (ref.is_null $binding)
+      (then $fallback)
+      (else
+        (struct.get $dynamic.binding $value
+          (ref.as_non_null $binding)))))
+
+  (export "dynamic-unbound" (tag $dynamic.unbound)))

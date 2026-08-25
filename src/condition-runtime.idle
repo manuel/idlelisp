@@ -1,0 +1,432 @@
+(module
+  (class condition)
+  (class error (extends condition))
+  (class simple-error
+    (extends error)
+    (field message (ref eq)))
+  (class restart-error
+    (extends error)
+    (field restart-name (ref eq)))
+
+  (import "idle" "nil"
+    (func $condition.nil (result (ref eq))))
+  (import "idle" "is_nil"
+    (func $condition.is-nil (param (ref eq)) (result i32)))
+  (import "idle" "cons"
+    (func $condition.cons
+      (param (ref eq))
+      (param (ref eq))
+      (result (ref eq))))
+  (import "idle" "is_cons"
+    (func $condition.is-cons (param (ref eq)) (result i32)))
+  (import "idle" "cdr"
+    (func $condition.cdr (param (ref eq)) (result (ref eq))))
+  (import "idle" "list_reverse_prepend"
+    (func $condition.list-reverse-prepend
+      (param (ref eq)) (param (ref eq)) (result (ref eq))))
+  (import "idle" "is_symbol"
+    (func $condition.is-symbol (param (ref eq)) (result i32)))
+  (import "idle" "symbol_has_module"
+    (func $condition.symbol-has-module (param (ref eq)) (result i32)))
+
+  (type $condition.body.sig
+    (func
+      (param $environment (ref null $dynamic.binding))
+      (param $context (ref null eq))
+      (result (ref eq))))
+  (type $condition.handler.sig
+    (func
+      (param $environment (ref null $dynamic.binding))
+      (param $context (ref null eq))
+      (param $value (ref eq))
+      (result (ref eq))))
+
+  (rec
+  (type $condition.body.closure
+    (struct
+      (field $code (ref func))
+      (field $context (ref null eq))))
+  (type $condition.handler.closure
+    (struct
+      (field $code (ref func))
+      (field $context (ref null eq))))
+  (type $condition.restart.closure
+    (struct
+      (field $code (ref func))
+      (field $context (ref null eq))))
+
+  (type $condition.handler.entry
+      (struct
+        (field $matcher (ref $condition.match.sig))
+        (field $closure (ref $condition.handler.closure))
+        (field $next (ref null $condition.handler.entry))))
+  (type $condition.handler.frame
+      (struct
+        (field $case i32)
+        (field $entries (ref null $condition.handler.entry))
+        (field $parent (ref null $condition.handler.frame))))
+  (type $condition.restart.entry
+      (struct
+        (field $name (ref eq))
+        (field $closure (ref $condition.restart.closure))
+        (field $next (ref null $condition.restart.entry))))
+  (type $condition.restart.frame
+      (struct
+        (field $case i32)
+        (field $entries (ref null $condition.restart.entry))
+        (field $parent (ref null $condition.restart.frame))))
+
+  (type $condition.handler.transfer
+    (struct
+      (field $frame (ref $condition.handler.frame))
+      (field $entry (ref $condition.handler.entry))
+      (field $value (ref $condition))))
+  (type $condition.restart.transfer
+    (struct
+      (field $frame (ref $condition.restart.frame))
+      (field $entry (ref $condition.restart.entry))
+      (field $arguments (ref eq)))))
+
+  (tag $condition.handler-transfer
+    (param (ref $condition.handler.transfer)))
+  (tag $condition.restart-transfer
+    (param (ref $condition.restart.transfer)))
+  (tag $condition.unhandled (param (ref $condition)))
+
+  (defun $condition.tag-is-a
+    (($actual (ref $tag)) ($expected (ref $tag)) i32)
+    (let $cursor (ref null $tag) $actual)
+    (block $not-found
+      (loop $next
+        (if (ref.is_null $cursor)
+          (then (br $not-found)))
+        (if
+          (ref.eq (ref.as_non_null $cursor) $expected)
+          (then (return (i32.const 1))))
+        (set $cursor
+          (struct.get $tag $classes.parent-tag
+            (ref.as_non_null $cursor)))
+        (br $next)))
+    (i32.const 0))
+
+  (defun $condition.current-handler (($environment (ref null $dynamic.binding)) (ref null $condition.handler.frame))
+    (let $binding (ref null $dynamic.binding)
+      ($dynamic.find $environment 'condition-handler-frame))
+    (if (ref.is_null $binding)
+      (then (return (ref.null $condition.handler.frame))))
+    (let $value (ref eq)
+      (struct.get $dynamic.binding $value (ref.as_non_null $binding)))
+    (if ($condition.is-nil $value)
+      (then (return (ref.null $condition.handler.frame))))
+    (ref.cast (ref $condition.handler.frame) $value))
+
+  (defun $condition.current-restart (($environment (ref null $dynamic.binding)) (ref null $condition.restart.frame))
+    (let $binding (ref null $dynamic.binding)
+      ($dynamic.find $environment 'condition-restart-frame))
+    (if (ref.is_null $binding)
+      (then (return (ref.null $condition.restart.frame))))
+    (let $value (ref eq)
+      (struct.get $dynamic.binding $value (ref.as_non_null $binding)))
+    (if ($condition.is-nil $value)
+      (then (return (ref.null $condition.restart.frame))))
+    (ref.cast (ref $condition.restart.frame) $value))
+
+  (defun $condition.frame-or-nil (($frame (ref null $condition.handler.frame)) (ref eq))
+    (if (result (ref eq))
+      (ref.is_null $frame)
+      (then ($condition.nil))
+      (else (ref.as_non_null $frame))))
+
+  (defun $condition.find-handler-entry (($entries (ref null $condition.handler.entry)) ($value (ref $condition)) (ref null $condition.handler.entry))
+    (let $cursor (ref null $condition.handler.entry) $entries)
+    (let $entry (ref null $condition.handler.entry) (ref.null $condition.handler.entry))
+    (block $missing
+      (loop $search
+        (br_if $missing (ref.is_null $cursor))
+        (set $entry $cursor)
+        (if
+          (call_ref $condition.match.sig
+            $value
+            (struct.get $condition.handler.entry $matcher (ref.as_non_null $entry)))
+          (then (return $entry)))
+        (set $cursor
+          (struct.get $condition.handler.entry $next (ref.as_non_null $entry)))
+        (br $search)))
+    (ref.null $condition.handler.entry))
+
+  (defun $condition.call-body (($environment (ref null $dynamic.binding)) ($closure (ref $condition.body.closure)) (ref eq))
+    (return_call_ref $condition.body.sig
+      $environment
+      (struct.get $condition.body.closure $context $closure)
+      (ref.cast (ref $condition.body.sig)
+        (struct.get $condition.body.closure $code $closure))))
+
+  (defun $condition.call-handler (($environment (ref null $dynamic.binding)) ($closure (ref $condition.handler.closure)) ($value (ref $condition)) (ref eq))
+    (call_ref $condition.handler.sig
+      $environment
+      (struct.get $condition.handler.closure $context $closure)
+      $value
+      (ref.cast (ref $condition.handler.sig)
+        (struct.get $condition.handler.closure $code $closure))))
+
+  (defun $condition.call-restart (($environment (ref null $dynamic.binding)) ($closure (ref $condition.restart.closure)) ($arguments (ref eq)) (ref eq))
+    (call_ref $condition.handler.sig
+      $environment
+      (struct.get $condition.restart.closure $context $closure)
+      $arguments
+      (ref.cast (ref $condition.handler.sig)
+        (struct.get $condition.restart.closure $code $closure))))
+
+  (defun $condition.handler-bind (($environment (ref null $dynamic.binding)) ($entries (ref null $condition.handler.entry)) ($body (ref $condition.body.closure)) (ref eq))
+    (let $frame (ref $condition.handler.frame)
+      (struct.new $condition.handler.frame
+        (i32.const 0)
+        $entries
+        ($condition.current-handler $environment)))
+    (return_call $condition.call-body
+      ($dynamic.bind $environment 'condition-handler-frame $frame)
+      $body))
+
+  (defun $condition.handler-case (($environment (ref null $dynamic.binding)) ($entries (ref null $condition.handler.entry)) ($body (ref $condition.body.closure)) (ref eq))
+    (let $frame (ref $condition.handler.frame)
+      (struct.new $condition.handler.frame
+        (i32.const 1)
+        $entries
+        ($condition.current-handler $environment)))
+    (let $transfer (ref null $condition.handler.transfer)
+      (ref.null $condition.handler.transfer))
+    (let $result anyref
+      (try (result anyref)
+        (do
+          ($condition.call-body
+            ($dynamic.bind $environment 'condition-handler-frame $frame)
+            $body))
+        (catch $condition.handler-transfer
+          (local.set $transfer)
+          (if
+            (i32.eqz
+              (ref.eq
+                (struct.get $condition.handler.transfer $frame
+                  (ref.as_non_null $transfer))
+                $frame))
+            (then
+              (throw $condition.handler-transfer
+                (ref.as_non_null $transfer))))
+          ($condition.call-handler
+            $environment
+            (struct.get $condition.handler.entry $closure
+              (struct.get $condition.handler.transfer $entry
+                (ref.as_non_null $transfer)))
+            (struct.get $condition.handler.transfer $value
+              (ref.as_non_null $transfer))))))
+    (ref.cast (ref eq) $result))
+
+  (defun $condition.signal (($environment (ref null $dynamic.binding)) ($value (ref $condition)) (ref eq))
+    (let $frame (ref null $condition.handler.frame)
+      ($condition.current-handler $environment))
+    (let $selected-frame (ref null $condition.handler.frame)
+      (ref.null $condition.handler.frame))
+    (let $entry (ref null $condition.handler.entry)
+      (ref.null $condition.handler.entry))
+    (let $selected-entry (ref null $condition.handler.entry)
+      (ref.null $condition.handler.entry))
+    (let $parent (ref null $condition.handler.frame)
+      (ref.null $condition.handler.frame))
+    (block $done
+      (loop $search-frames
+        (br_if $done (ref.is_null $frame))
+        (set $selected-frame $frame)
+        (set $entry
+          ($condition.find-handler-entry
+            (struct.get $condition.handler.frame $entries (ref.as_non_null $selected-frame))
+            $value))
+        (if (ref.is_null $entry)
+          (then
+            (set $frame
+              (struct.get $condition.handler.frame $parent
+                (ref.as_non_null $selected-frame)))
+            (br $search-frames)))
+        (set $selected-entry $entry)
+        (if (struct.get $condition.handler.frame $case (ref.as_non_null $selected-frame))
+          (then
+            (throw $condition.handler-transfer
+              (struct.new $condition.handler.transfer
+                (ref.as_non_null $selected-frame)
+                (ref.as_non_null $selected-entry)
+                $value))))
+        (set $parent
+          (struct.get $condition.handler.frame $parent
+            (ref.as_non_null $selected-frame)))
+        (drop
+          ($condition.call-handler
+            ($dynamic.bind
+              $environment
+              'condition-handler-frame
+              ($condition.frame-or-nil $parent))
+            (struct.get $condition.handler.entry $closure
+              (ref.as_non_null $selected-entry))
+            $value))
+        (set $frame $parent)
+        (br $search-frames)))
+    ($condition.nil))
+
+  (defun $condition.error (($environment (ref null $dynamic.binding)) ($value (ref $condition)) (ref eq))
+    (drop ($condition.signal $environment $value))
+    (throw $condition.unhandled $value))
+
+  (defun $condition.restart-bind (($environment (ref null $dynamic.binding)) ($entries (ref null $condition.restart.entry)) ($body (ref $condition.body.closure)) (ref eq))
+    (let $frame (ref $condition.restart.frame)
+      (struct.new $condition.restart.frame
+        (i32.const 0)
+        $entries
+        ($condition.current-restart $environment)))
+    (return_call $condition.call-body
+      ($dynamic.bind $environment 'condition-restart-frame $frame)
+      $body))
+
+  (defun $condition.restart-case (($environment (ref null $dynamic.binding)) ($entries (ref null $condition.restart.entry)) ($body (ref $condition.body.closure)) (ref eq))
+    (let $frame (ref $condition.restart.frame)
+      (struct.new $condition.restart.frame
+        (i32.const 1)
+        $entries
+        ($condition.current-restart $environment)))
+    (let $transfer (ref null $condition.restart.transfer)
+      (ref.null $condition.restart.transfer))
+    (let $result anyref
+      (try (result anyref)
+        (do
+          ($condition.call-body
+            ($dynamic.bind $environment 'condition-restart-frame $frame)
+            $body))
+        (catch $condition.restart-transfer
+          (local.set $transfer)
+          (if
+            (i32.eqz
+              (ref.eq
+                (struct.get $condition.restart.transfer $frame
+                  (ref.as_non_null $transfer))
+                $frame))
+            (then
+              (throw $condition.restart-transfer
+                (ref.as_non_null $transfer))))
+          ($condition.call-restart
+            $environment
+            (struct.get $condition.restart.entry $closure
+              (struct.get $condition.restart.transfer $entry
+                (ref.as_non_null $transfer)))
+            (struct.get $condition.restart.transfer $arguments
+              (ref.as_non_null $transfer))))))
+    (ref.cast (ref eq) $result))
+
+  (defun $condition.proper-list (($value (ref eq)) i32)
+    (let $cursor (ref eq) $value)
+    (block $proper
+      (loop $search
+        (br_if $proper ($condition.is-nil $cursor))
+        (if (i32.eqz ($condition.is-cons $cursor))
+          (then (return (i32.const 0))))
+        (set $cursor ($condition.cdr $cursor))
+        (br $search)))
+    (i32.const 1))
+
+  (defun $condition.compute-restarts (($environment (ref null $dynamic.binding)) (ref eq))
+    (let $frame (ref null $condition.restart.frame)
+      ($condition.current-restart $environment))
+    (let $entry (ref null $condition.restart.entry)
+      (ref.null $condition.restart.entry))
+    (let $reversed (ref eq) ($condition.nil))
+    (block $done
+      (loop $frames
+        (br_if $done (ref.is_null $frame))
+        (set $entry
+          (struct.get $condition.restart.frame $entries
+            (ref.as_non_null $frame)))
+        (block $next-frame
+          (loop $entries
+            (br_if $next-frame (ref.is_null $entry))
+            (set $reversed
+              ($condition.cons
+                (struct.get $condition.restart.entry $name
+                  (ref.as_non_null $entry))
+                $reversed))
+            (set $entry
+              (struct.get $condition.restart.entry $next
+                (ref.as_non_null $entry)))
+            (br $entries)))
+        (set $frame
+          (struct.get $condition.restart.frame $parent
+            (ref.as_non_null $frame)))
+        (br $frames)))
+    ($condition.list-reverse-prepend $reversed ($condition.nil)))
+
+  (defun $condition.invoke-restart (($environment (ref null $dynamic.binding)) ($name (ref eq)) ($arguments (ref eq)) (ref eq))
+    (let $frame (ref null $condition.restart.frame)
+      (ref.null $condition.restart.frame))
+    (let $selected-frame (ref null $condition.restart.frame)
+      (ref.null $condition.restart.frame))
+    (let $entry (ref null $condition.restart.entry)
+      (ref.null $condition.restart.entry))
+    (let $selected-entry (ref null $condition.restart.entry)
+      (ref.null $condition.restart.entry))
+    (if (i32.eqz ($condition.is-symbol $name))
+      (then
+        (return
+          ($condition.error
+            $environment
+            ($simple-error.new "restart name must be a plain symbol")))))
+    (if ($condition.symbol-has-module $name)
+      (then
+        (return
+          ($condition.error
+            $environment
+            ($simple-error.new "restart name must be a plain symbol")))))
+    (if (i32.eqz ($condition.proper-list $arguments))
+      (then
+        (return
+          ($condition.error
+            $environment
+            ($simple-error.new "restart arguments must be a proper list")))))
+    (set $frame ($condition.current-restart $environment))
+    (block $missing
+      (loop $search-frames
+        (br_if $missing (ref.is_null $frame))
+        (set $selected-frame $frame)
+        (set $entry
+          (struct.get $condition.restart.frame $entries
+            (ref.as_non_null $selected-frame)))
+        (block $next-frame
+          (loop $search-entries
+            (br_if $next-frame (ref.is_null $entry))
+            (set $selected-entry $entry)
+            (if
+              (ref.eq
+                (struct.get $condition.restart.entry $name
+                  (ref.as_non_null $selected-entry))
+                $name)
+              (then
+                (if
+                  (struct.get $condition.restart.frame $case
+                    (ref.as_non_null $selected-frame))
+                  (then
+                    (throw $condition.restart-transfer
+                      (struct.new $condition.restart.transfer
+                        (ref.as_non_null $selected-frame)
+                        (ref.as_non_null $selected-entry)
+                        $arguments))))
+                (return
+                  ($condition.call-restart
+                    $environment
+                    (struct.get $condition.restart.entry $closure
+                      (ref.as_non_null $selected-entry))
+                    $arguments))))
+            (set $entry
+              (struct.get $condition.restart.entry $next
+                (ref.as_non_null $selected-entry)))
+            (br $search-entries)))
+        (set $frame
+          (struct.get $condition.restart.frame $parent
+            (ref.as_non_null $selected-frame)))
+        (br $search-frames)))
+    ($condition.error $environment ($restart-error.new $name)))
+
+  (export "condition-unhandled" (tag $condition.unhandled)))
