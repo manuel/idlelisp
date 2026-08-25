@@ -14,9 +14,8 @@ Core features
 - Lisp syntax with macros that are loaded from WebAssembly modules.
   Macros receive and return syntax forms (conses) as normal GC'ed objects.
 
-- Static type checking for the object system and generic calls.  Only
-  subsections of code need to be typed, user can use full .wat syntax
-  elsewhere.
+- Wasm-validated types for the object system and generic calls, with full
+  WAT-shaped function bodies available throughout the language.
 
 Results
 
@@ -35,10 +34,9 @@ Lisp: cleanup with `unwind-protect`, typed conditions, handlers, and named
 restarts.
 
 Those features are deliberately not hidden behind a large compiler. Idle keeps
-WebAssembly visible. A programmer can use a checked source subset where it is
-useful, write raw WAT-shaped forms where precise control is needed, and extend
-the language with macros compiled to Wasm. The result is best understood as
-three layers:
+WebAssembly visible: functions use WAT-shaped bodies with small expression
+shorthands, and macros compiled to Wasm extend that same language. The result is
+best understood as three layers:
 
 1. a statically typed object language;
 2. Lisp syntax with external, language-authored macros; and
@@ -50,46 +48,31 @@ language. Its restrictions are as important as its implemented features.
 
 == 1. A statically typed object language
 
-=== Typed functions
+=== Functions
 
-The checked function form has the same compact signature shape as the unchecked
-`defun` form:
+`defun` provides a compact signature around a WAT-shaped function body:
 
 [source,lisp]
 ----
-(typed-defun $count (($list List) i32)
-  (let $length i32 0)
-  (let $cursor List $list)
-  (while (i32.eqz ($is-empty $cursor))
-    (set $cursor ($tail $cursor))
-    (set $length (i32.add $length 1)))
-  $length)
+(defun $count (($list (ref $List)) i32)
+  (let $length i32 (i32.const 0))
+  (let $cursor (ref $List) $list)
+  (block $done
+    (loop $again
+      (br_if $done (call $is-empty (local.get $cursor)))
+      (local.set $cursor (call $tail (local.get $cursor)))
+      (local.set $length
+        (i32.add (local.get $length) (i32.const 1)))
+      (br $again)))
+  (local.get $length))
 ----
 
-Arguments, results, and locals are declared by the programmer. Inside the body,
-the compiler infers the types of literals, local reads, arithmetic, direct
-calls, constructors, and generic-function calls. In `($tail $cursor)`, for
-example, the `defgeneric` declaration supplies the checked signature, while the
-runtime class of `$cursor` selects the method.
-
-The current checked type universe is intentionally small:
-
-- `i32`;
-- non-null class types such as `List`;
-- nominal widening from a subclass to one of its ancestors.
-
-The checked expression language is also closed. It currently includes integer
-literals, direct calls (including generic functions), constructors, `i32.add`,
-`i32.sub`, `i32.eqz`, top-level typed `let`, assignment with `set`, and `while`.
-Parameters cannot be reassigned, locals cannot be introduced in nested bodies,
-and a `typed-defun` has exactly one result. These constraints make type checking
-and lowering small enough to audit.
-
-Unchecked `defun` remains the escape hatch for full WAT-shaped bodies and types
-outside the checked subset. Idle is therefore statically typed where its source
-language applies, but it is not pretending that arbitrary embedded WAT has been
-verified by a richer source type system. Binaryen and the Wasm validator remain
-the final authority for that code.
+Parameters, results, and locals use explicit Wasm types. Idle provides shorthand
+for local reads, named calls, `let`, and `set`, while allowing arbitrary WAT
+instructions and user macros in the same body. Constructor and generic-function
+calls use ordinary `$name` call syntax. Binaryen and the Wasm validator enforce
+their generated function signatures, GC reference types, and nominal subtype
+relationships.
 
 === Classes, fields, and generic functions
 
@@ -133,9 +116,9 @@ the standard mutable Wasm struct-field representation.
     (call-next-method $object)
     (classes:get OffsetCounter offset $object)))
 
-(typed-defun $main (i32)
-  (let $counter Counter
-    ($OffsetCounter.new 17 5))
+(defun $main (i32)
+  (let $counter (ref $Counter)
+    ($OffsetCounter.new (i32.const 17) (i32.const 5)))
   ($read $counter))
 ----
 
@@ -402,11 +385,10 @@ The layers reinforce one another:
 - Wasm exception tags provide the non-local transfer needed by case handlers,
   restarts, and cleanup.
 
-At the same time, the boundaries remain visible. The checked expression subset
-does not cover every control feature. Macro authors can emit arbitrary WAT, but
-must preserve the structural invariants expected by cleanup and condition
-forms. Explicit environment passing provides predictable state flow at the cost
-of the transparency normally associated with dynamic scope.
+At the same time, the boundaries remain visible. Macro authors can emit
+arbitrary WAT, but must preserve the structural invariants expected by cleanup
+and condition forms. Explicit environment passing provides predictable state
+flow at the cost of the transparency normally associated with dynamic scope.
 
 This mixture is the central Idle experiment: use a small statically typed object
 core, implement language growth as Wasm-hosted Lisp macros, and add high-level
@@ -437,9 +419,9 @@ The macro module defines `(demo:double expression)` by constructing an
       ($cons $expression ($cons $expression #nil)))))
 ----
 
-The application uses that macro inside a specialized method. The checked entry
-point only knows that `$meter` is a `Meter`, so `($reading $meter)` dispatches
-through its runtime class:
+The application uses that macro inside a specialized method. The entry point
+stores the object as `(ref $Meter)`, while `($reading $meter)` dispatches through
+its runtime class:
 
 [source,lisp]
 ----
@@ -461,9 +443,9 @@ through its runtime class:
         (call-next-method $meter)
         (classes:get CalibratedMeter correction $meter))))
 
-  (typed-defun $main (i32)
-    (let $meter Meter
-      ($CalibratedMeter.new 17 5))
+  (defun $main (i32)
+    (let $meter (ref $Meter)
+      ($CalibratedMeter.new (i32.const 17) (i32.const 5)))
     ($reading $meter))
 
   (export-func main))
@@ -486,12 +468,8 @@ The `Meter` method returns `17`. The specialized method calls it, adds the
 correction `5`, and the external macro duplicates the pure resulting expression
 into an addition. The exported `main` therefore returns `44`.
 
-This example also exposes a current staging boundary. User macros compose
-naturally with raw WAT-shaped method bodies. A user macro nested directly inside
-`typed-defun` is not expanded before that function's closed expression checker
-runs, so checked functions should call generic functions or raw helpers that
-contain such extensions. Moving user expansion ahead of checked lowering is a
-natural future improvement.
+User macros compose directly with the WAT-shaped bodies of both `defun` and
+`defmethod`.
 
 == Toolchain and developer tools
 
@@ -599,9 +577,6 @@ link:benchmark/oop-list.idle[benchmark/oop-list.idle].
 Idle already demonstrates that these three ideas can coexist in a small Wasm-GC
 system, but important work remains:
 
-- broaden the checked language beyond `i32`, non-null class references, and its
-  current expression set;
-- type-check `defmethod` bodies instead of requiring WAT-shaped implementations;
 - support richer reader syntax and quoted data;
 - introduce a disciplined approach to macro hygiene;
 - allow user macro modules to depend on one another;

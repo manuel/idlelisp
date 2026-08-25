@@ -1,7 +1,7 @@
 (module
-(typed-defun $main (i32)
-  (let $counter Counter
-    ($OffsetCounter.new 17 5))
+(defun $main (i32)
+  (let $counter (ref $Counter)
+    ($OffsetCounter.new (i32.const 17) (i32.const 5)))
   ($read $counter))
 
 (export-func main)

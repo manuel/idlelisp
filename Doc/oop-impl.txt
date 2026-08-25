@@ -151,7 +151,7 @@ loads the fixed slot, and tail-calls the selected reference:
         (local.get $list)))))
 ```
 
-A call from `typed-defun` therefore lowers like any other known direct call:
+A call from `defun` lowers like any other named direct call:
 
 ```wat
 (local.set $cursor

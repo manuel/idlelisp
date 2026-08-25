@@ -16,7 +16,6 @@ const CLASS_DSL_HEADS = new Set([
   "class",
   "defgeneric",
   "defmethod",
-  "typed-defun",
   "export-new",
   "export-method",
   "export-func",

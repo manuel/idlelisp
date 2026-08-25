@@ -270,21 +270,6 @@ export function createClassMacroHost({ wasm, internPlain, symbolLocalName }) {
     return undefined;
   }
 
-  function formatCheckedType(type) {
-    return type.kind === "i32" ? "i32" : type.classInfo.name;
-  }
-
-  function isAssignable(actual, expected) {
-    if (actual.kind !== expected.kind) return false;
-    if (actual.kind === "i32") return true;
-    let cursor = actual.classInfo;
-    while (cursor !== undefined) {
-      if (cursor === expected.classInfo) return true;
-      cursor = cursor.parent;
-    }
-    return false;
-  }
-
   function datumTypeKey(value) {
     if (wasm.abi_is_symbol(value) && !wasm.abi_symbol_has_module(value)) {
       return symbolLocalName(value);
@@ -310,7 +295,6 @@ export function createClassMacroHost({ wasm, internPlain, symbolLocalName }) {
           field.sourceIndex,
           `field ${classInfo.name}.${field.name}`,
         );
-        field.checkedType = type.checked;
         field.valueType = type.wat;
         field.storageType = field.mutable
           ? list(symbol("mut"), type.wat)
@@ -354,7 +338,6 @@ export function createClassMacroHost({ wasm, internPlain, symbolLocalName }) {
         generic.sourceIndex,
         `result of ${generic.name}`,
       );
-      generic.checkedResult = resultType.checked;
       generic.result = resultType.wat;
     }
 
@@ -384,7 +367,6 @@ export function createClassMacroHost({ wasm, internPlain, symbolLocalName }) {
         method.sourceIndex,
         `result of ${method.name}`,
       );
-      method.checkedResult = resultType.checked;
       method.result = resultType.wat;
       method.generic = generic;
       method.specializer = method.parameters[0].checkedType.classInfo;
@@ -461,332 +443,6 @@ export function createClassMacroHost({ wasm, internPlain, symbolLocalName }) {
       return list(symbol("call"), implementationId(method.next), ...values.slice(1));
     }
     return list(...values.map((item) => lowerNextMethod(item, method)));
-  }
-
-  function parseTypedFunction(item, classes) {
-    const values = listValues(item.form);
-    if (values.length < 4) {
-      fail("INVALID_TYPED_DEFUN", "typed-defun requires a name, signature, and body", item.sourceIndex);
-    }
-    const name = functionIdentifier(values[1], item.sourceIndex, "typed function");
-    const signature = listValues(values[2]);
-    if (signature.length < 1) {
-      fail("INVALID_TYPED_SIGNATURE", `${name} requires exactly one result type`, item.sourceIndex);
-    }
-    const parameters = [];
-    const seen = new Set();
-    for (const parameterValue of signature.slice(0, -1)) {
-      const parts = listValues(parameterValue);
-      requireLength(
-        parts,
-        2,
-        "INVALID_TYPED_PARAMETER",
-        `${name} parameters require a name and type`,
-        item.sourceIndex,
-      );
-      const parameterName = functionIdentifier(parts[0], item.sourceIndex, "parameter");
-      if (parameterName === "$this" || parameterName === "$self") {
-        fail("RESERVED_PARAMETER", `parameter ${parameterName} is reserved`, item.sourceIndex);
-      }
-      if (seen.has(parameterName)) {
-        fail("DUPLICATE_PARAMETER", `duplicate parameter ${parameterName}`, item.sourceIndex);
-      }
-      seen.add(parameterName);
-      parameters.push({
-        name: parameterName,
-        type: checkedTypeFromDatum(
-          parts[1],
-          classes,
-          item.sourceIndex,
-          `parameter ${parameterName}`,
-          true,
-        ),
-      });
-    }
-    const resultType = checkedTypeFromDatum(
-      signature.at(-1),
-      classes,
-      item.sourceIndex,
-      `result of ${name}`,
-      true,
-    );
-    return {
-      name,
-      nameValue: values[1],
-      parameters,
-      resultType,
-      body: values.slice(3),
-      sourceIndex: item.sourceIndex,
-    };
-  }
-
-  function rawFunctionSignature(item, classes) {
-    if (headName(item.form) !== "defun") return undefined;
-    const values = listValues(item.form);
-    if (values.length < 3) return undefined;
-    let name;
-    let signature;
-    try {
-      name = functionIdentifier(values[1], item.sourceIndex);
-      signature = listValues(values[2]);
-    } catch {
-      return undefined;
-    }
-    if (signature.length < 1) return undefined;
-    const parameters = [];
-    for (const parameterValue of signature.slice(0, -1)) {
-      let parts;
-      try {
-        parts = listValues(parameterValue);
-      } catch {
-        return undefined;
-      }
-      if (parts.length !== 2) return undefined;
-      const parameterName = localName(parts[0], item.sourceIndex, "parameter");
-      const type = checkedTypeFromDatum(
-        parts[1],
-        classes,
-        item.sourceIndex,
-        `parameter ${parameterName}`,
-      );
-      if (type === undefined) return undefined;
-      parameters.push({ name: parameterName, type });
-    }
-    const resultType = checkedTypeFromDatum(
-      signature.at(-1),
-      classes,
-      item.sourceIndex,
-      `result of ${name}`,
-    );
-    return resultType === undefined ? undefined : { name, parameters, resultType };
-  }
-
-  function requireAssignable(actual, expected, sourceIndex, context) {
-    if (!isAssignable(actual, expected)) {
-      fail(
-        "TYPE_MISMATCH",
-        `${context} requires ${formatCheckedType(expected)}, got ${formatCheckedType(actual)}`,
-        sourceIndex,
-      );
-    }
-  }
-
-  function lowerTypedFunction(functionInfo, functions, classes) {
-    const voidType = { kind: "void" };
-    const environment = new Map(functionInfo.parameters.map((parameter) => [
-      parameter.name,
-      { kind: "parameter", type: parameter.type },
-    ]));
-    let loopIndex = 0;
-
-    function checkArguments(arguments_, parameters, context) {
-      if (arguments_.length !== parameters.length) {
-        fail(
-          "TYPED_CALL_ARITY",
-          `${context} expects ${parameters.length} arguments, got ${arguments_.length}`,
-          functionInfo.sourceIndex,
-        );
-      }
-      return arguments_.map((argument, index) => {
-        const checked = checkExpression(argument);
-        requireAssignable(
-          checked.type,
-          parameters[index].type,
-          functionInfo.sourceIndex,
-          `argument ${index + 1} of ${context}`,
-        );
-        return checked.form;
-      });
-    }
-
-    function checkExpression(value) {
-      if (wasm.abi_is_integer(value)) {
-        return { type: { kind: "i32" }, form: list(symbol("i32.const"), value) };
-      }
-      if (wasm.abi_is_symbol(value) && !wasm.abi_symbol_has_module(value)) {
-        const name = symbolLocalName(value);
-        if (!name.startsWith("$")) {
-          fail("UNSUPPORTED_TYPED_EXPRESSION", `unsupported typed expression ${name}`, functionInfo.sourceIndex);
-        }
-        const binding = environment.get(name);
-        if (binding === undefined) {
-          fail("UNKNOWN_TYPED_LOCAL", `unknown local ${name}`, functionInfo.sourceIndex);
-        }
-        return { type: binding.type, form: value };
-      }
-      if (!wasm.abi_is_cons(value)) {
-        fail("UNSUPPORTED_TYPED_EXPRESSION", "unsupported typed expression", functionInfo.sourceIndex);
-      }
-      const values = listValues(value);
-      if (values.length === 0) {
-        fail("UNSUPPORTED_TYPED_EXPRESSION", "empty typed expression", functionInfo.sourceIndex);
-      }
-      const name = localName(values[0], functionInfo.sourceIndex, "expression");
-      if (name === "i32.add" || name === "i32.sub") {
-        requireLength(values, 3, "TYPED_ARITY", `${name} expects two operands`, functionInfo.sourceIndex);
-        const first = checkExpression(values[1]);
-        const second = checkExpression(values[2]);
-        const i32 = { kind: "i32" };
-        requireAssignable(first.type, i32, functionInfo.sourceIndex, `${name} operand`);
-        requireAssignable(second.type, i32, functionInfo.sourceIndex, `${name} operand`);
-        return { type: i32, form: list(symbol(name), first.form, second.form) };
-      }
-      if (name === "i32.eqz") {
-        requireLength(values, 2, "TYPED_ARITY", "i32.eqz expects one operand", functionInfo.sourceIndex);
-        const operand = checkExpression(values[1]);
-        const i32 = { kind: "i32" };
-        requireAssignable(operand.type, i32, functionInfo.sourceIndex, "i32.eqz operand");
-        return { type: i32, form: list(symbol("i32.eqz"), operand.form) };
-      }
-      if (/^\.[A-Za-z_][A-Za-z0-9_-]*$/.test(name)) {
-        fail(
-          "METHOD_SEND_SYNTAX_REMOVED",
-          `${name} has been replaced by an ordinary $generic call with the receiver first`,
-          functionInfo.sourceIndex,
-        );
-      }
-      if (name.startsWith("$")) {
-        const constructorMatch = /^\$([A-Za-z_][A-Za-z0-9_-]*)\.new$/.exec(name);
-        if (constructorMatch !== null) {
-          const classInfo = classes.get(constructorMatch[1]);
-          if (classInfo === undefined) {
-            fail("UNKNOWN_TYPED_CONSTRUCTOR", `unknown constructor ${name}`, functionInfo.sourceIndex);
-          }
-          if (classInfo.layout.some((field) => field.checkedType === undefined)) {
-            fail("UNCHECKED_CONSTRUCTOR", `${name} does not have a checked signature`, functionInfo.sourceIndex);
-          }
-          const parameters = classInfo.layout.map((field) => ({
-            name: field.name,
-            type: field.checkedType,
-          }));
-          const arguments_ = checkArguments(values.slice(1), parameters, name);
-          return {
-            type: { kind: "class", classInfo },
-            form: list(symbol("call"), symbol(name), ...arguments_),
-          };
-        }
-        const target = functions.get(name);
-        if (target === undefined) {
-          fail("UNKNOWN_TYPED_FUNCTION", `unknown checked function ${name}`, functionInfo.sourceIndex);
-        }
-        const arguments_ = checkArguments(values.slice(1), target.parameters, name);
-        return {
-          type: target.resultType,
-          form: list(symbol("call"), symbol(name), ...arguments_),
-        };
-      }
-      fail("UNSUPPORTED_TYPED_EXPRESSION", `unsupported typed expression ${name}`, functionInfo.sourceIndex);
-    }
-
-    function checkSet(values) {
-      requireLength(values, 3, "INVALID_TYPED_SET", "set requires a local and value", functionInfo.sourceIndex);
-      const name = functionIdentifier(values[1], functionInfo.sourceIndex, "assigned local");
-      const binding = environment.get(name);
-      if (binding === undefined) fail("UNKNOWN_TYPED_LOCAL", `unknown local ${name}`, functionInfo.sourceIndex);
-      if (binding.kind === "parameter") {
-        fail("PARAMETER_ASSIGNMENT", `cannot assign parameter ${name}`, functionInfo.sourceIndex);
-      }
-      const value = checkExpression(values[2]);
-      requireAssignable(value.type, binding.type, functionInfo.sourceIndex, `assignment to ${name}`);
-      return { type: voidType, form: list(symbol("set"), symbol(name), value.form) };
-    }
-
-    function checkWhile(values) {
-      if (values.length < 2) fail("INVALID_TYPED_WHILE", "while requires a condition", functionInfo.sourceIndex);
-      const condition = checkExpression(values[1]);
-      requireAssignable(condition.type, { kind: "i32" }, functionInfo.sourceIndex, "while condition");
-      const body = values.slice(2).map((bodyValue) => {
-        if (headName(bodyValue) === "let") {
-          fail("NESTED_TYPED_LOCAL", "typed locals must be declared directly in the function body", functionInfo.sourceIndex);
-        }
-        const checked = checkStatement(bodyValue, false);
-        if (checked.type.kind !== "void") {
-          fail("NON_VOID_WHILE_BODY", "while body expressions must be void", functionInfo.sourceIndex);
-        }
-        return checked.form;
-      });
-      const labelBase = `typed.${functionInfo.name.slice(1)}.${loopIndex}`;
-      loopIndex += 1;
-      const done = id(`${labelBase}.done`);
-      const again = id(`${labelBase}.again`);
-      return {
-        type: voidType,
-        form: list(
-          symbol("block"),
-          done,
-          list(
-            symbol("loop"),
-            again,
-            list(symbol("br_if"), done, list(symbol("i32.eqz"), condition.form)),
-            ...body,
-            list(symbol("br"), again),
-          ),
-        ),
-      };
-    }
-
-    function checkStatement(value, topLevel) {
-      const name = headName(value);
-      if (name === "set") return checkSet(listValues(value));
-      if (name === "while") return checkWhile(listValues(value));
-      if (name === "let") {
-        if (!topLevel) {
-          fail("NESTED_TYPED_LOCAL", "typed locals must be declared directly in the function body", functionInfo.sourceIndex);
-        }
-        const values = listValues(value);
-        requireLength(values, 4, "INVALID_TYPED_LET", "let requires a local, type, and initializer", functionInfo.sourceIndex);
-        const name = functionIdentifier(values[1], functionInfo.sourceIndex, "local");
-        if (name === "$this" || name === "$self") {
-          fail("RESERVED_LOCAL", `local ${name} is reserved`, functionInfo.sourceIndex);
-        }
-        if (environment.has(name)) fail("DUPLICATE_LOCAL", `duplicate local ${name}`, functionInfo.sourceIndex);
-        const type = checkedTypeFromDatum(
-          values[2],
-          classes,
-          functionInfo.sourceIndex,
-          `local ${name}`,
-          true,
-        );
-        const initializer = checkExpression(values[3]);
-        requireAssignable(initializer.type, type, functionInfo.sourceIndex, `initializer for ${name}`);
-        environment.set(name, { kind: "local", type });
-        return {
-          type: voidType,
-          form: list(symbol("let"), symbol(name), type.wat, initializer.form),
-        };
-      }
-      return checkExpression(value);
-    }
-
-    const body = functionInfo.body.map((value, index) => {
-      const checked = checkStatement(value, true);
-      const last = index === functionInfo.body.length - 1;
-      if (!last && checked.type.kind !== "void") {
-        fail("NON_VOID_TYPED_STATEMENT", "only the final typed function form may produce a value", functionInfo.sourceIndex);
-      }
-      if (last) {
-        if (checked.type.kind === "void") {
-          fail("MISSING_TYPED_RESULT", `${functionInfo.name} must end with a result`, functionInfo.sourceIndex);
-        }
-        requireAssignable(
-          checked.type,
-          functionInfo.resultType,
-          functionInfo.sourceIndex,
-          `result of ${functionInfo.name}`,
-        );
-      }
-      return checked.form;
-    });
-    if (body.length === 0) {
-      fail("MISSING_TYPED_RESULT", `${functionInfo.name} must have a body`, functionInfo.sourceIndex);
-    }
-    const signature = list(
-      ...functionInfo.parameters.map((parameter) => (
-        list(symbol(parameter.name), parameter.type.wat)
-      )),
-      functionInfo.resultType.wat,
-    );
-    return list(symbol("defun"), symbol(functionInfo.name), signature, ...body);
   }
 
   function param(name, type) {
@@ -1041,7 +697,6 @@ export function createClassMacroHost({ wasm, internPlain, symbolLocalName }) {
     const generics = new Map();
     const methodItems = [];
     const rawFields = [];
-    const typedFunctionItems = [];
     const exports = [];
     for (const [sourceOrder, item] of sourceForms.entries()) {
       const name = headName(item.form);
@@ -1057,8 +712,6 @@ export function createClassMacroHost({ wasm, internPlain, symbolLocalName }) {
         parseGeneric(item.form, item.sourceIndex, generics, sourceOrder);
       } else if (name === "defmethod") {
         methodItems.push(item);
-      } else if (name === "typed-defun") {
-        typedFunctionItems.push(item);
       } else if (name === "export-new" || name === "export-method" || name === "export-func") {
         exports.push({ kind: name, values: listValues(item.form), sourceIndex: item.sourceIndex });
       } else {
@@ -1070,21 +723,9 @@ export function createClassMacroHost({ wasm, internPlain, symbolLocalName }) {
     for (const classInfo of classes.values()) resolveClass(classInfo, classes, ordered);
     normalizeClassDeclarations(ordered, classes);
     const { genericList } = resolveGenerics(generics, methodItems, ordered, classes);
-    const functions = new Map();
     const declaredFunctionNames = new Set();
     for (const generic of genericList) {
       declaredFunctionNames.add(generic.name);
-      if (generic.parameters.every((parameter) => parameter.checkedType !== undefined)
-          && generic.checkedResult !== undefined) {
-        functions.set(generic.name, {
-          name: generic.name,
-          parameters: generic.parameters.map((parameter) => ({
-            name: parameter.name,
-            type: parameter.checkedType,
-          })),
-          resultType: generic.checkedResult,
-        });
-      }
     }
     for (const item of rawFields) {
       if (headName(item.form) !== "defun") continue;
@@ -1095,20 +736,7 @@ export function createClassMacroHost({ wasm, internPlain, symbolLocalName }) {
         fail("DUPLICATE_FUNCTION", `duplicate function ${name}`, item.sourceIndex);
       }
       declaredFunctionNames.add(name);
-      const signature = rawFunctionSignature(item, classes);
-      if (signature !== undefined) functions.set(name, signature);
     }
-    const typedFunctions = typedFunctionItems.map((item) => parseTypedFunction(item, classes));
-    for (const functionInfo of typedFunctions) {
-      if (declaredFunctionNames.has(functionInfo.name)) {
-        fail("DUPLICATE_FUNCTION", `duplicate function ${functionInfo.name}`, functionInfo.sourceIndex);
-      }
-      declaredFunctionNames.add(functionInfo.name);
-      functions.set(functionInfo.name, functionInfo);
-    }
-    const loweredTypedFunctions = typedFunctions.map((functionInfo) => (
-      lowerTypedFunction(functionInfo, functions, classes)
-    ));
     const externalNames = new Set();
     const exportFields = [];
     for (const item of exports) {
@@ -1181,7 +809,7 @@ export function createClassMacroHost({ wasm, internPlain, symbolLocalName }) {
     for (const classInfo of ordered) moduleFields.push(emitDescriptor(classInfo));
     for (const classInfo of ordered) moduleFields.push(emitConstructor(classInfo));
     for (const generic of genericList) moduleFields.push(emitDispatcher(generic));
-    moduleFields.push(...nonImportFields, ...loweredTypedFunctions, ...exportFields);
+    moduleFields.push(...nonImportFields, ...exportFields);
     return list(symbol("module"), ...moduleFields);
   }
 

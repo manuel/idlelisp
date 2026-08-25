@@ -224,21 +224,6 @@ describe("Idle class compiler", () => {
     assert.include(wat, "(func $answer (result i32)");
   });
 
-  it("checks typed-defun calls with the same signature shape as defun", async () => {
-    const wat = await compileToWat({ sources: [source("typed.idle", `
-      (typed-defun $answer (i32)
-        (i32.add ($identity 20) ($identity 21)))
-      (typed-defun $identity (($value i32) i32)
-        $value)
-      (export-func answer)
-    `)] });
-    const exports = await instantiate(wat);
-
-    assert.strictEqual(exports.answer(), 41);
-    assert.include(wat, "(func $answer (result i32)");
-    assert.include(wat, "(call $identity (i32.const 20))");
-  });
-
   it("accepts compact defclass roots, superclass lists, and direct fields", async () => {
     const wat = await compileToWat({ sources: [source("defclass.idle", `
       (defclass Root)
@@ -266,15 +251,15 @@ describe("Idle class compiler", () => {
     assert.include(wat, "(field $count (mut i32))");
   });
 
-  it("checks typed constructors, nominal upcasts, and inherited generic methods", async () => {
-    const wat = await compileToWat({ sources: [source("typed-objects.idle", `
+  it("calls constructors and generic functions from ordinary defun bodies", async () => {
+    const wat = await compileToWat({ sources: [source("objects.idle", `
       (defclass A)
       (defclass B (A))
       (defgeneric $value ((object A) i32))
       (defmethod $value ((object A) i32) (i32.const 7))
-      (typed-defun $make (A)
+      (defun $make ((ref $A))
         ($B.new))
-      (typed-defun $read (i32)
+      (defun $read (i32)
         ($value ($make)))
       (export-func read)
     `)] });
@@ -285,7 +270,7 @@ describe("Idle class compiler", () => {
     assert.include(wat, "(call $value (call $make))");
   });
 
-  it("checks ordinary generic dispatch from typed local declarations", async () => {
+  it("dispatches generic calls from ordinary defun locals", async () => {
     const wat = await compileFilesToWat({
       inputPaths: [new URL("../benchmark/oop-list.idle", import.meta.url)],
     });
@@ -297,34 +282,6 @@ describe("Idle class compiler", () => {
     assert.include(wat, "(call $is-empty (local.get $cursor))");
     assert.include(wat, "(call $tail (local.get $cursor))");
     assert.include(wat, "(local $cursor (ref $List))");
-  });
-
-  it("reports static errors in typed-defun before WAT validation", async () => {
-    const cases = [
-      ["(typed-defun $bad (() i32) 0)", "INVALID_TYPED_PARAMETER"],
-      ["(typed-defun $bad (($value Missing) i32) 0)", "UNKNOWN_CHECKED_TYPE"],
-      ["(typed-defun $bad (($value i32) i32) (set $value 1) $value)", "PARAMETER_ASSIGNMENT"],
-      ["(typed-defun $bad (i32) (let $value i32 0) (let $value i32 1) $value)", "DUPLICATE_LOCAL"],
-      ["(typed-defun $bad (i32) $missing)", "UNKNOWN_TYPED_LOCAL"],
-      ["(typed-defun $bad (($value i32) i32) (.tail $value))", "METHOD_SEND_SYNTAX_REMOVED"],
-      ["(defclass A) (typed-defun $bad (($value A) i32) (.missing $value))", "METHOD_SEND_SYNTAX_REMOVED"],
-      ["(defclass A) (defgeneric $f ((a A) (value i32) i32)) (defmethod $f ((a A) (value i32) i32) $value) (typed-defun $bad (($a A) i32) ($f $a))", "TYPED_CALL_ARITY"],
-      ["(typed-defun $bad (($value i32) i32) (i32.mul $value 2))", "UNSUPPORTED_TYPED_EXPRESSION"],
-      ["(typed-defun $bad (($value i32) i32) (while $value (let $x i32 0)) 0)", "NESTED_TYPED_LOCAL"],
-      ["(defclass A) (defclass B (A)) (typed-defun $bad (($value A) B) $value)", "TYPE_MISMATCH"],
-      ["(defclass A) (defclass B (A)) (defgeneric $f ((a A) (value i32) i32)) (defmethod $f ((b B) i32) (i32.const 0))", "METHOD_SIGNATURE_MISMATCH"],
-    ];
-
-    for (const [text, code] of cases) {
-      let error;
-      try {
-        await compileToWat({ sources: [source("typed-error.idle", text)] });
-      } catch (caught) {
-        error = caught;
-      }
-      assert.strictEqual(error?.code, code, text);
-      assert.strictEqual(error?.sourceName, "typed-error.idle", text);
-    }
   });
 
   it("lowers elif clauses to nested WAT if expressions", async () => {
@@ -653,6 +610,7 @@ describe("Idle class compiler", () => {
       ["(defclass A () (x i32)) (defgeneric $f ((a A) i32)) (defmethod $f ((a A) i32) (classes:set A x $a (i32.const 1)) (i32.const 0))", "IMMUTABLE_FIELD"],
       ["(defclass A) (defmethod $missing ((a A) i32) (i32.const 0))", "UNKNOWN_GENERIC"],
       ["(defgeneric $f ((x i32) i32))", "INVALID_DISPATCH_TYPE"],
+      ["(defclass A) (defclass B (A)) (defgeneric $f ((a A) (value i32) i32)) (defmethod $f ((b B) i32) (i32.const 0))", "METHOD_SIGNATURE_MISMATCH"],
       ["(defclass A) (defclass B) (defgeneric $f ((a A) i32)) (defmethod $f ((b B) i32) (i32.const 0))", "UNRELATED_METHOD_SPECIALIZER"],
       ["(defclass A) (defgeneric $f ((a A) i32)) (defmethod $f ((a A) i32) (i32.const 0)) (defmethod $f ((other A) i32) (i32.const 1))", "DUPLICATE_METHOD"],
       ["(defclass A) (defgeneric $f ((a A) i32)) (defun $f (i32) (i32.const 0))", "DUPLICATE_FUNCTION"],

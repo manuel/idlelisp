@@ -16,9 +16,9 @@
         (call-next-method $meter)
         (classes:get CalibratedMeter correction $meter))))
 
-  (typed-defun $main (i32)
-    (let $meter Meter
-      ($CalibratedMeter.new 17 5))
+  (defun $main (i32)
+    (let $meter (ref $Meter)
+      ($CalibratedMeter.new (i32.const 17) (i32.const 5)))
     ($reading $meter))
 
   (export-func main))

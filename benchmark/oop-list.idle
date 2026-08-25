@@ -21,24 +21,32 @@
 (defmethod $tail ((list Node) List)
   (classes:get Node next $list))
 
-(typed-defun $build (($size i32) List)
+(defun $build (($size i32) (ref $List))
   (let $remaining i32 $size)
-  (let $list List ($Nil.new))
-  (while $remaining
-    (set $list ($Node.new $list))
-    (set $remaining (i32.sub $remaining 1)))
-  $list)
+  (let $list (ref $List) ($Nil.new))
+  (block $build.done
+    (loop $build.again
+      (br_if $build.done (i32.eqz (local.get $remaining)))
+      (local.set $list (call $Node.new (local.get $list)))
+      (local.set $remaining
+        (i32.sub (local.get $remaining) (i32.const 1)))
+      (br $build.again)))
+  (local.get $list))
 
-(typed-defun $count (($list List) i32)
-  (let $length i32 0)
-  (let $cursor List $list)
-  (while (i32.eqz ($is-empty $cursor))
-    (set $cursor ($tail $cursor))
-    (set $length (i32.add $length 1)))
-  $length)
+(defun $count (($list (ref $List)) i32)
+  (let $length i32 (i32.const 0))
+  (let $cursor (ref $List) $list)
+  (block $count.done
+    (loop $count.again
+      (br_if $count.done (call $is-empty (local.get $cursor)))
+      (local.set $cursor (call $tail (local.get $cursor)))
+      (local.set $length
+        (i32.add (local.get $length) (i32.const 1)))
+      (br $count.again)))
+  (local.get $length))
 
-(typed-defun $build-and-count (($size i32) i32)
-  ($count ($build $size)))
+(defun $build-and-count (($size i32) i32)
+  (call $count (call $build (local.get $size))))
 
 (export-func build)
 (export-func count)

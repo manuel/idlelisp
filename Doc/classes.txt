@@ -81,23 +81,25 @@ Exports use the ordinary constructor and function forms:
   (export-func read)
   (export-func write)
 
-`typed-defun` uses the same signature-list shape and checks a small source
-language before lowering it to WAT:
+Ordinary `defun` uses explicit Wasm reference types while retaining Idle's
+compact signature and expression shorthand:
 
-  (typed-defun $length (($list List) i32)
-    (let $cursor List $list)
-    (let $length i32 0)
-    (while (i32.eqz ($is-empty $cursor))
-      (set $cursor ($tail $cursor))
-      (set $length (i32.add $length 1)))
-    $length)
+  (defun $length (($list (ref $List)) i32)
+    (let $cursor (ref $List) $list)
+    (let $length i32 (i32.const 0))
+    (block $done
+      (loop $again
+        (br_if $done (call $is-empty (local.get $cursor)))
+        (local.set $cursor (call $tail (local.get $cursor)))
+        (local.set $length
+          (i32.add (local.get $length) (i32.const 1)))
+        (br $again)))
+    (local.get $length))
 
-Parameters, the single result, and locals are explicitly typed. Checked types
-are `i32` and non-null class names such as `List`; class references flow to
-ancestor types. Ordinary `$name` calls are checked against a known `defun`,
-`typed-defun`, constructor, or `defgeneric` signature. The checked body also
-supports integer literals, `i32.add`, `i32.sub`, `i32.eqz`, `let`, `set`, and
-`while`. Use ordinary `defun` for unchecked WAT bodies.
+Parameters, results, and locals are explicitly typed. Ordinary `$name` calls
+cover functions, constructors, and generics; their emitted Wasm signatures are
+validated by Binaryen and the Wasm validator. Function bodies accept arbitrary
+WAT-shaped expressions plus Idle's call, local, `let`, and `set` shorthand.
 
 For example:
 
