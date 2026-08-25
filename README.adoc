@@ -26,7 +26,7 @@ with very little code.  Implementation vibed, but not too shabby.
 Since this is WIP, for now a clanker-written article will have to
 suffice.
 
-== Introduction
+== Idle: A statically-typed, low-level "Lisp" for Wasm GC
 
 Idle is an experimental language built directly around WebAssembly GC. Its
 surface is Lisp-shaped, its object system is statically typed and based on
