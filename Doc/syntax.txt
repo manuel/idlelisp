@@ -32,9 +32,10 @@ function local and initializes it at that source position; it cannot be nested.
 
 Its body accepts WAT-shaped forms and Idle expression shorthand. In value and
 storage type positions, `$Type` abbreviates non-null `(ref $Type)`; write
-`(ref null $Type)` explicitly for a nullable reference. Ordinary `$name` calls
-include generated constructors and generic functions. A symbol beginning with
-`.` has no special call meaning.
+`(ref null $Type)` explicitly for a nullable reference. A bare integer in an
+expression position abbreviates `(i32.const integer)`; numeric WAT immediates
+remain unwrapped. Ordinary `$name` calls include generated constructors and
+generic functions. A symbol beginning with `.` has no special call meaning.
 
 An integer is [+-]?[0-9]+ and must be between -1073741824 and
 1073741823.  Other tokens are symbols, except tokens beginning with #.

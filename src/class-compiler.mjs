@@ -39,8 +39,8 @@ const WAT_OPERAND_POLICIES = new Map([
   ...[
     "data", "elem", "export", "field", "global.get", "i32.const", "i64.const",
     "f32.const", "f64.const", "import", "local", "local.get", "memory", "mut",
-    "param", "rec", "ref", "ref.func", "ref.null", "result", "start", "struct",
-    "sub", "table", "tag", "type",
+    "param", "rec", "ref", "ref.func", "ref.null", "result", "rethrow", "start",
+    "struct", "sub", "table", "tag", "type",
   ].map((head) => [head, OPERANDS_NONE]),
   ...[
     "br", "br_if", "call", "call_ref", "catch", "global.set", "local.set", "local.tee",
@@ -416,7 +416,8 @@ function emitExpandedWat(idle, root, {
         }
       }
     } else if (kind === "integer") {
-      output.push(String(idle.integerValue(task.value)));
+      const value = String(idle.integerValue(task.value));
+      output.push(task.shorthand ? `(i32.const ${value})` : value);
     } else if (kind === "string") {
       const bytes = idle.stringBytes(task.value);
       if (stringPool !== undefined && task.shorthand) {

@@ -224,6 +224,23 @@ describe("Idle class compiler", () => {
     assert.include(wat, "(func $answer (result i32)");
   });
 
+  it("lowers bare integer expressions to i32.const", async () => {
+    const wat = await compileToWat({ sources: [source("integer-shorthand.idle", `
+      (defun $identity (($value i32) i32)
+        $value)
+      (defun $answer (i32)
+        (i32.add 1 ($identity 41)))
+      (export-func answer)
+    `)] });
+    const exports = await instantiate(wat);
+
+    assert.strictEqual(exports.answer(), 42);
+    assert.include(
+      wat,
+      "(i32.add (i32.const 1) (call $identity (i32.const 41)))",
+    );
+  });
+
   it("expands named heap types in value and storage type positions", async () => {
     const wat = await compileToWat({ sources: [source("type-sugar.idle", `
       (defclass Meter)

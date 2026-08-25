@@ -86,13 +86,13 @@ compact signature and expression shorthand:
 
   (defun $length (($list $List) i32)
     (let $cursor $List $list)
-    (let $length i32 (i32.const 0))
+    (let $length i32 0)
     (block $done
       (loop $again
         (br_if $done (call $is-empty (local.get $cursor)))
         (local.set $cursor (call $tail (local.get $cursor)))
         (local.set $length
-          (i32.add (local.get $length) (i32.const 1)))
+          (i32.add (local.get $length) 1))
         (br $again)))
     (local.get $length))
 
@@ -100,8 +100,9 @@ Parameters, results, and locals are explicitly typed. In a value or storage
 type position, `$Type` abbreviates non-null `(ref $Type)`; nullable references
 still use `(ref null $Type)`. Ordinary `$name` calls cover functions,
 constructors, and generics; their emitted Wasm signatures are validated by
-Binaryen and the Wasm validator. Function bodies accept arbitrary WAT-shaped
-expressions plus Idle's call, local, `let`, and `set` shorthand.
+Binaryen and the Wasm validator. A bare integer in an expression position
+abbreviates `i32.const`. Function bodies accept arbitrary WAT-shaped expressions
+plus Idle's call, local, `let`, and `set` shorthand.
 
 For example:
 

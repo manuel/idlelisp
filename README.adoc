@@ -55,26 +55,26 @@ language. Its restrictions are as important as its implemented features.
 [source,lisp]
 ----
 (defun $count (($list $List) i32)
-  (let $length i32 (i32.const 0))
+  (let $length i32 0)
   (let $cursor $List $list)
   (block $done
     (loop $again
       (br_if $done (call $is-empty (local.get $cursor)))
       (local.set $cursor (call $tail (local.get $cursor)))
       (local.set $length
-        (i32.add (local.get $length) (i32.const 1)))
+        (i32.add (local.get $length) 1))
       (br $again)))
   (local.get $length))
 ----
 
 Parameters, results, and locals use Wasm types; in value or storage type
-positions, a named `$Type` abbreviates the non-null `(ref $Type)`. Idle also
-provides shorthand for local reads, named calls, `let`, and `set`, while allowing
-arbitrary WAT instructions and user macros in the same body. Constructor and
-generic-function calls use ordinary `$name` call syntax. Binaryen and the Wasm
-validator enforce their generated function signatures, GC reference types, and
-nominal subtype relationships. Nullable references remain explicit as
-`(ref null $Type)`.
+positions, a named `$Type` abbreviates the non-null `(ref $Type)`. A bare integer
+expression such as `1` abbreviates `(i32.const 1)`. Idle also provides shorthand
+for local reads, named calls, `let`, and `set`, while allowing arbitrary WAT
+instructions and user macros in the same body. Constructor and generic-function
+calls use ordinary `$name` call syntax. Binaryen and the Wasm validator enforce
+their generated function signatures, GC reference types, and nominal subtype
+relationships. Nullable references remain explicit as `(ref null $Type)`.
 
 === Classes, fields, and generic functions
 
