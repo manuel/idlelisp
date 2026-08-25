@@ -33,6 +33,7 @@ const OPERANDS_ALL = Object.freeze({ mode: "all" });
 const OPERANDS_LAST = Object.freeze({ mode: "last" });
 const OPERANDS_AFTER_ONE = Object.freeze({ mode: "after", count: 1 });
 const OPERANDS_AFTER_TWO = Object.freeze({ mode: "after", count: 2 });
+const OPERANDS_AFTER_THREE = Object.freeze({ mode: "after", count: 3 });
 const OPERANDS_AFTER_OPTIONAL_NAME = Object.freeze({ mode: "afterOptionalName" });
 const WAT_OPERAND_POLICIES = new Map([
   ...[
@@ -43,11 +44,14 @@ const WAT_OPERAND_POLICIES = new Map([
   ].map((head) => [head, OPERANDS_NONE]),
   ...[
     "br", "br_if", "call", "call_ref", "catch", "global.set", "local.set", "local.tee",
-    "return_call", "return_call_ref", "struct.new", "throw",
+    "ref.cast", "ref.test", "return_call", "return_call_ref", "struct.new", "throw",
   ].map((head) => [head, OPERANDS_AFTER_ONE]),
   ...[
     "struct.get", "struct.get_s", "struct.get_u", "struct.set",
   ].map((head) => [head, OPERANDS_AFTER_TWO]),
+  ...[
+    "br_on_cast", "br_on_cast_fail",
+  ].map((head) => [head, OPERANDS_AFTER_THREE]),
   ...[
     "block", "func", "if", "loop", "try",
   ].map((head) => [head, OPERANDS_AFTER_OPTIONAL_NAME]),
@@ -188,6 +192,35 @@ function operandUsesShorthand(idle, values, head, index) {
   throw new Error(`unknown WAT operand policy: ${policy.mode}`);
 }
 
+function operandIsValueType(idle, values, head, index) {
+  if (index === 0) return false;
+  if (head === "result") return true;
+  if (head === "mut" || head === "array") return index === 1;
+  if (head === "ref.cast" || head === "ref.test") return index === 1;
+  if (head === "br_on_cast" || head === "br_on_cast_fail") {
+    return index === 2 || index === 3;
+  }
+  if (head === "param" || head === "local" || head === "field") {
+    const first = values.length > 1 ? plainSymbolName(idle, values[1]) : undefined;
+    const hasName = values.length > 2 && first?.startsWith("$");
+    return index > (hasName ? 1 : 0);
+  }
+  if (head === "global") {
+    const first = values.length > 1 ? plainSymbolName(idle, values[1]) : undefined;
+    const hasName = values.length > 3 && first?.startsWith("$");
+    return index === (hasName ? 2 : 1);
+  }
+  return false;
+}
+
+function emitValueType(idle, value, options) {
+  return emitExpandedWat(idle, value, {
+    ...options,
+    enableShorthand: false,
+    valueTypeRoot: true,
+  }).trimEnd();
+}
+
 function emitFunctionFields(idle, name, prefixDeclarations, fields, options) {
   const pieces = ["(func"];
   if (name !== undefined) pieces.push(` ${name}`);
@@ -213,10 +246,7 @@ function emitFunctionFields(idle, name, prefixDeclarations, fields, options) {
         "let requires a $local name, one value type, and one initializer",
       );
     }
-    const type = emitExpandedWat(idle, letValues[2], {
-      ...options,
-      enableShorthand: false,
-    }).trimEnd();
+    const type = emitValueType(idle, letValues[2], options);
     pieces.push(` (local ${localName} ${type})`);
   }
 
@@ -263,20 +293,14 @@ function emitDefun(idle, values, options) {
     const parts = idle.kind(item) === "cons" ? listValues(idle, item) : [];
     const parameterName = parts.length === 2 ? plainSymbolName(idle, parts[0]) : undefined;
     if (parameterName?.startsWith("$") && result === undefined) {
-      const type = emitExpandedWat(idle, parts[1], {
-        ...options,
-        enableShorthand: false,
-      }).trimEnd();
+      const type = emitValueType(idle, parts[1], options);
       parameters.push(`(param ${parameterName} ${type})`);
       continue;
     }
     if (result !== undefined) {
       throw compilerError("INVALID_DEFUN", "defun signature may contain only one result type");
     }
-    result = emitExpandedWat(idle, item, {
-      ...options,
-      enableShorthand: false,
-    }).trimEnd();
+    result = emitValueType(idle, item, options);
   }
   const fields = values.slice(3);
   const exports = fields
@@ -354,9 +378,15 @@ function emitExpandedWat(idle, root, {
   literalUsage,
   skippedForms = new Set(),
   preserveIdleStrings = false,
+  valueTypeRoot = false,
 } = {}) {
   const output = [];
-  const tasks = [{ type: "value", value: root, shorthand: enableShorthand }];
+  const tasks = [{
+    type: "value",
+    value: root,
+    shorthand: enableShorthand,
+    valueType: valueTypeRoot,
+  }];
   while (tasks.length > 0) {
     const task = tasks.pop();
     if (task.type === "text") {
@@ -377,9 +407,13 @@ function emitExpandedWat(idle, root, {
         output.push(`${moduleName}:${idle.symbolName(task.value)}`);
       } else {
         const name = idle.symbolName(task.value);
-        output.push(task.shorthand && name.startsWith("$")
-          ? `(local.get ${name})`
-          : name);
+        if (task.valueType && name.startsWith("$")) {
+          output.push(`(ref ${name})`);
+        } else {
+          output.push(task.shorthand && name.startsWith("$")
+            ? `(local.get ${name})`
+            : name);
+        }
       }
     } else if (kind === "integer") {
       output.push(String(idle.integerValue(task.value)));
@@ -502,6 +536,7 @@ function emitExpandedWat(idle, root, {
           shorthand: task.shorthand && (directCall
             ? index > 0
             : operandUsesShorthand(idle, values, head, index)),
+          valueType: operandIsValueType(idle, values, head, index),
         });
         if (index > 0) tasks.push({ type: "text", text: " " });
       }

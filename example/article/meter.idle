@@ -5,19 +5,19 @@
   (defclass CalibratedMeter (Meter)
     (correction i32))
 
-  (defgeneric $reading ((meter Meter) i32))
+  (defgeneric $reading ((meter $Meter) i32))
 
-  (defmethod $reading ((meter Meter) i32)
+  (defmethod $reading ((meter $Meter) i32)
     (classes:get Meter value $meter))
 
-  (defmethod $reading ((meter CalibratedMeter) i32)
+  (defmethod $reading ((meter $CalibratedMeter) i32)
     (demo:double
       (i32.add
         (call-next-method $meter)
         (classes:get CalibratedMeter correction $meter))))
 
   (defun $main (i32)
-    (let $meter (ref $Meter)
+    (let $meter $Meter
       ($CalibratedMeter.new (i32.const 17) (i32.const 5)))
     ($reading $meter))
 

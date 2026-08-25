@@ -2,7 +2,7 @@
 (defclass OffsetCounter (Counter)
   (offset i32))
 
-(defmethod $read ((object OffsetCounter) i32)
+(defmethod $read ((object $OffsetCounter) i32)
   (i32.add
     (call-next-method $object)
     (classes:get OffsetCounter offset $object)))

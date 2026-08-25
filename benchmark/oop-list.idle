@@ -4,26 +4,26 @@
 (defclass Nil (List))
 
 (defclass Node (List)
-  (next List))
+  (next $List))
 
-(defgeneric $is-empty ((list List) i32))
-(defgeneric $tail ((list List) List))
+(defgeneric $is-empty ((list $List) i32))
+(defgeneric $tail ((list $List) $List))
 
-(defmethod $is-empty ((list List) i32)
+(defmethod $is-empty ((list $List) i32)
   (i32.const 1))
 
-(defmethod $tail ((list List) List)
+(defmethod $tail ((list $List) $List)
   $list)
 
-(defmethod $is-empty ((list Node) i32)
+(defmethod $is-empty ((list $Node) i32)
   (i32.const 0))
 
-(defmethod $tail ((list Node) List)
+(defmethod $tail ((list $Node) $List)
   (classes:get Node next $list))
 
-(defun $build (($size i32) (ref $List))
+(defun $build (($size i32) $List)
   (let $remaining i32 $size)
-  (let $list (ref $List) ($Nil.new))
+  (let $list $List ($Nil.new))
   (block $build.done
     (loop $build.again
       (br_if $build.done (i32.eqz (local.get $remaining)))
@@ -33,9 +33,9 @@
       (br $build.again)))
   (local.get $list))
 
-(defun $count (($list (ref $List)) i32)
+(defun $count (($list $List) i32)
   (let $length i32 (i32.const 0))
-  (let $cursor (ref $List) $list)
+  (let $cursor $List $list)
   (block $count.done
     (loop $count.again
       (br_if $count.done (call $is-empty (local.get $cursor)))

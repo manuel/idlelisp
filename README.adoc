@@ -54,9 +54,9 @@ language. Its restrictions are as important as its implemented features.
 
 [source,lisp]
 ----
-(defun $count (($list (ref $List)) i32)
+(defun $count (($list $List) i32)
   (let $length i32 (i32.const 0))
-  (let $cursor (ref $List) $list)
+  (let $cursor $List $list)
   (block $done
     (loop $again
       (br_if $done (call $is-empty (local.get $cursor)))
@@ -67,12 +67,14 @@ language. Its restrictions are as important as its implemented features.
   (local.get $length))
 ----
 
-Parameters, results, and locals use explicit Wasm types. Idle provides shorthand
-for local reads, named calls, `let`, and `set`, while allowing arbitrary WAT
-instructions and user macros in the same body. Constructor and generic-function
-calls use ordinary `$name` call syntax. Binaryen and the Wasm validator enforce
-their generated function signatures, GC reference types, and nominal subtype
-relationships.
+Parameters, results, and locals use Wasm types; in value or storage type
+positions, a named `$Type` abbreviates the non-null `(ref $Type)`. Idle also
+provides shorthand for local reads, named calls, `let`, and `set`, while allowing
+arbitrary WAT instructions and user macros in the same body. Constructor and
+generic-function calls use ordinary `$name` call syntax. Binaryen and the Wasm
+validator enforce their generated function signatures, GC reference types, and
+nominal subtype relationships. Nullable references remain explicit as
+`(ref null $Type)`.
 
 === Classes, fields, and generic functions
 
@@ -101,23 +103,23 @@ zero-or-one-element superclass list followed directly by `(name type)` fields;
 a field-bearing root uses `()`. Wrapping a field type as `(mut type)` requests
 the standard mutable Wasm struct-field representation.
 
-(defgeneric $read ((object Counter) i32))
-(defgeneric $write ((object Counter) (value i32) i32))
+(defgeneric $read ((object $Counter) i32))
+(defgeneric $write ((object $Counter) (value i32) i32))
 
-(defmethod $read ((object Counter) i32)
+(defmethod $read ((object $Counter) i32)
   (classes:get Counter value $object))
 
-(defmethod $write ((object Counter) (value i32) i32)
+(defmethod $write ((object $Counter) (value i32) i32)
   (classes:set Counter value $object $value)
   (i32.const 0))
 
-(defmethod $read ((object OffsetCounter) i32)
+(defmethod $read ((object $OffsetCounter) i32)
   (i32.add
     (call-next-method $object)
     (classes:get OffsetCounter offset $object)))
 
 (defun $main (i32)
-  (let $counter (ref $Counter)
+  (let $counter $Counter
     ($OffsetCounter.new (i32.const 17) (i32.const 5)))
   ($read $counter))
 ----
@@ -420,7 +422,8 @@ The macro module defines `(demo:double expression)` by constructing an
 ----
 
 The application uses that macro inside a specialized method. The entry point
-stores the object as `(ref $Meter)`, while `($reading $meter)` dispatches through
+stores the object as `$Meter` (short for `(ref $Meter)`), while
+`($reading $meter)` dispatches through
 its runtime class:
 
 [source,lisp]
@@ -432,19 +435,19 @@ its runtime class:
   (defclass CalibratedMeter (Meter)
     (correction i32))
 
-  (defgeneric $reading ((meter Meter) i32))
+  (defgeneric $reading ((meter $Meter) i32))
 
-  (defmethod $reading ((meter Meter) i32)
+  (defmethod $reading ((meter $Meter) i32)
     (classes:get Meter value $meter))
 
-  (defmethod $reading ((meter CalibratedMeter) i32)
+  (defmethod $reading ((meter $CalibratedMeter) i32)
     (demo:double
       (i32.add
         (call-next-method $meter)
         (classes:get CalibratedMeter correction $meter))))
 
   (defun $main (i32)
-    (let $meter (ref $Meter)
+    (let $meter $Meter
       ($CalibratedMeter.new (i32.const 17) (i32.const 5)))
     ($reading $meter))
 

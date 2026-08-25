@@ -224,6 +224,63 @@ describe("Idle class compiler", () => {
     assert.include(wat, "(func $answer (result i32)");
   });
 
+  it("expands named heap types in value and storage type positions", async () => {
+    const wat = await compileToWat({ sources: [source("type-sugar.idle", `
+      (defclass Meter)
+      (type $Callback (func (param $Meter) (result $Meter)))
+      (type $Holder (struct
+        (field $meter $Meter)
+        (field $mutable (mut $Meter))
+        (field $nullable (ref null $Meter))))
+      (type $MeterArray (array $Meter))
+      (type $Empty (struct))
+      (global $Empty (struct.new $Empty))
+      (global $singleton $Empty (struct.new $Empty))
+      (func $raw-identity
+        (param $meter $Meter)
+        (result $Meter)
+        (local $copy $Meter)
+        (local.set $copy (local.get $meter))
+        (local.get $copy))
+      (func $raw-cast
+        (param $meter (ref null $Meter))
+        (result $Meter)
+        (ref.cast $Meter $meter))
+      (func $raw-test
+        (param $value (ref null eq))
+        (result i32)
+        (ref.test $Meter $value))
+      (defun $identity (($meter $Meter) $Meter)
+        (let $copy $Meter $meter)
+        $copy)
+      (defgeneric $read ((meter $Meter) $Meter))
+      (defmethod $read ((meter $Meter) $Meter) $meter)
+      (export-new Meter)
+      (export-func identity)
+      (export-func read)
+      (export "raw-cast" (func $raw-cast))
+      (export "raw-test" (func $raw-test))
+    `)] });
+    const exports = await instantiate(wat);
+    const meter = exports["Meter.new"]();
+
+    assert.strictEqual(exports.identity(meter), meter);
+    assert.strictEqual(exports.read(meter), meter);
+    assert.strictEqual(exports["raw-cast"](meter), meter);
+    assert.strictEqual(exports["raw-test"](meter), 1);
+    assert.include(wat, "(param $meter (ref $Meter))");
+    assert.include(wat, "(result (ref $Meter))");
+    assert.include(wat, "(local $copy (ref $Meter))");
+    assert.include(wat, "(field $meter (ref $Meter))");
+    assert.include(wat, "(field $mutable (mut (ref $Meter)))");
+    assert.include(wat, "(field $nullable (ref null $Meter))");
+    assert.include(wat, "(array (ref $Meter))");
+    assert.include(wat, "(global (ref $Empty) (struct.new $Empty))");
+    assert.include(wat, "(global $singleton (ref $Empty) (struct.new $Empty))");
+    assert.include(wat, "(ref.cast (ref $Meter) (local.get $meter))");
+    assert.include(wat, "(ref.test (ref $Meter) (local.get $value))");
+  });
+
   it("accepts compact defclass roots, superclass lists, and direct fields", async () => {
     const wat = await compileToWat({ sources: [source("defclass.idle", `
       (defclass Root)

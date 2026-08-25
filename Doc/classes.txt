@@ -26,17 +26,17 @@ Generic functions and methods are top-level declarations. Their signature list
 has the same shape as `defun`: named parameters followed by one result type.
 Both forms always require at least one parameter and exactly one result.
 
-  (defgeneric $read ((object Counter) i32))
-  (defgeneric $write ((object Counter) (value i32) i32))
+  (defgeneric $read ((object $Counter) i32))
+  (defgeneric $write ((object $Counter) (value i32) i32))
 
-  (defmethod $read ((object Counter) i32)
+  (defmethod $read ((object $Counter) i32)
     (classes:get Counter value $object))
 
-  (defmethod $write ((object Counter) (value i32) i32)
+  (defmethod $write ((object $Counter) (value i32) i32)
     (classes:set Counter value $object $value)
     (i32.const 0))
 
-  (defmethod $read ((object OffsetCounter) i32)
+  (defmethod $read ((object $OffsetCounter) i32)
     (i32.add
       (call-next-method $object)
       (classes:get OffsetCounter offset $object)))
@@ -84,8 +84,8 @@ Exports use the ordinary constructor and function forms:
 Ordinary `defun` uses explicit Wasm reference types while retaining Idle's
 compact signature and expression shorthand:
 
-  (defun $length (($list (ref $List)) i32)
-    (let $cursor (ref $List) $list)
+  (defun $length (($list $List) i32)
+    (let $cursor $List $list)
     (let $length i32 (i32.const 0))
     (block $done
       (loop $again
@@ -96,10 +96,12 @@ compact signature and expression shorthand:
         (br $again)))
     (local.get $length))
 
-Parameters, results, and locals are explicitly typed. Ordinary `$name` calls
-cover functions, constructors, and generics; their emitted Wasm signatures are
-validated by Binaryen and the Wasm validator. Function bodies accept arbitrary
-WAT-shaped expressions plus Idle's call, local, `let`, and `set` shorthand.
+Parameters, results, and locals are explicitly typed. In a value or storage
+type position, `$Type` abbreviates non-null `(ref $Type)`; nullable references
+still use `(ref null $Type)`. Ordinary `$name` calls cover functions,
+constructors, and generics; their emitted Wasm signatures are validated by
+Binaryen and the Wasm validator. Function bodies accept arbitrary WAT-shaped
+expressions plus Idle's call, local, `let`, and `set` shorthand.
 
 For example:
 

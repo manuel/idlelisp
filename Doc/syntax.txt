@@ -30,8 +30,9 @@ function local and initializes it at that source position; it cannot be nested.
 
   (defun $name (($argument Type) ... ResultType) body ...)
 
-Its body accepts WAT-shaped forms and Idle expression shorthand. Class
-references use explicit types such as `(ref $Counter)`. Ordinary `$name` calls
+Its body accepts WAT-shaped forms and Idle expression shorthand. In value and
+storage type positions, `$Type` abbreviates non-null `(ref $Type)`; write
+`(ref null $Type)` explicitly for a nullable reference. Ordinary `$name` calls
 include generated constructors and generic functions. A symbol beginning with
 `.` has no special call meaning.
 

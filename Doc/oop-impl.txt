@@ -11,14 +11,14 @@ This document follows the linked-list declarations in `benchmark/oop-list.idle`:
 (defclass List)
 (defclass Nil (List))
 (defclass Node (List)
-  (next List))
+  (next $List))
 
-(defgeneric $tail ((list List) List))
+(defgeneric $tail ((list $List) $List))
 
-(defmethod $tail ((list List) List)
+(defmethod $tail ((list $List) $List)
   $list)
 
-(defmethod $tail ((list Node) List)
+(defmethod $tail ((list $Node) $List)
   (classes:get Node next $list))
 ```
 
@@ -61,7 +61,7 @@ This is the same prefix-layout rule used for instance fields.
 Method source parameters are explicit:
 
 ```lisp
-(defmethod $tail ((list Node) List)
+(defmethod $tail ((list $Node) $List)
   (classes:get Node next $list))
 ```
 

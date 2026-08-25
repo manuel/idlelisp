@@ -1,6 +1,6 @@
 (module
 (defun $main (i32)
-  (let $counter (ref $Counter)
+  (let $counter $Counter
     ($OffsetCounter.new (i32.const 17) (i32.const 5)))
   ($read $counter))
 

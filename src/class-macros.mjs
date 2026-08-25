@@ -253,8 +253,8 @@ export function createClassMacroHost({ wasm, internPlain, symbolLocalName }) {
     if (wasm.abi_is_symbol(value) && !wasm.abi_symbol_has_module(value)) {
       const name = symbolLocalName(value);
       if (name === "i32") return { kind: "i32", wat: symbol("i32") };
-      const classInfo = classes.get(name);
-      if (classInfo !== undefined) return { kind: "class", classInfo, wat: ref(name) };
+      const classInfo = classes.get(name.startsWith("$") ? name.slice(1) : name);
+      if (classInfo !== undefined) return { kind: "class", classInfo, wat: ref(classInfo.name) };
     } else if (headName(value) === "ref") {
       const parts = listValues(value);
       if (parts.length === 2 && wasm.abi_is_symbol(parts[1])
